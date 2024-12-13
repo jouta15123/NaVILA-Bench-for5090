@@ -3,6 +3,11 @@
 ## Overview
 The VLN-CE-Isaac Benchmark is a framework for evaluating Visual Language Navigation in Isaac Lab. This repository contains the code and instructions to set up the environment, download the required data, and run the benchmark.
 
+https://github.com/user-attachments/assets/40d33586-09a2-42df-b14e-5a3f55b6ac6a
+
+
+
+
 ## Installation
 
 ### Prerequisites
