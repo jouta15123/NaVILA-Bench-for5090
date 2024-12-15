@@ -31,8 +31,10 @@ The VLN-CE-Isaac Benchmark is a framework for evaluating Visual Language Navigat
 
 3. Clone Isaac Lab and link the extensions.
 
+    **Note**: This codebase was tested with Isaac Lab 1.1.0 and may not be compatible with newer versions. Please make sure to use the modified version of Isaac Lab provided below, which includes important bug fixes and updates. As Isaac Lab is under active development, we will consider supporting newer versions in the future.
+
     ```shell
-    git clone git@github.com:h1-navigation/IsaacLab.git
+    git clone git@github.com:yang-zj1026/IsaacLab.git
     cd IsaacLab
     cd source/extensions
     ln -s {THIS_REPO_DIR}/isaaclab_exts/omni.isaac.vlnce .
@@ -66,7 +68,7 @@ python scripts/demo_planner.py --task=go2_matterport_vision --history_length=9 -
 
 python scripts/demo_planner.py --task=h1_matterport_vision --load_run=2024-11-03_15-08-09_height_scan_obst
 ```
-To train your own low-level policies, please refer to the [legged-loco](https://github.com/h1-navigation/legged-loco) repo.
+To train your own low-level policies, please refer to the [legged-loco](https://github.com/yang-zj1026/legged-loco) repo.
 
 ## Citation
 If you use VLN-CE-Isaac in your work please consider citing our paper:
@@ -84,6 +86,7 @@ If you use VLN-CE-Isaac in your work please consider citing our paper:
 This project makes use of the following open source codebase:
 
 - ViPlanner: [https://github.com/leggedrobotics/viplanner](https://github.com/leggedrobotics/viplanner)
+- VLN-CE: [https://github.com/jacobkrantz/VLN-CE](https://github.com/jacobkrantz/VLN-CE)
 
 
 ## License
