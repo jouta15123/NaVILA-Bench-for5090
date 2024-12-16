@@ -24,7 +24,7 @@ The VLN-CE-Isaac Benchmark is a framework for evaluating Visual Language Navigat
     conda activate vlnce-isaac
     ```
 
-2. Make sure that Isaac Sim is installed on your machine. Otherwise follow [this guideline](https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_workstation.html) to install it. On Ubuntu 22.04 or higher, you could install it via pip:
+2. Make sure that Isaac Sim is installed on your machine. Otherwise follow [this guideline](https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_workstation.html) to install it. If installing via the Omniverse Launcher, please ensure that Isaac Sim 4.1.0 is selected and installed. On Ubuntu 22.04 or higher, you could install it via pip:
     ```sh
     pip install isaacsim-rl==4.1.0 isaacsim-replicator==4.1.0 isaacsim-extscache-physics==4.1.0 isaacsim-extscache-kit-sdk==4.1.0 isaacsim-extscache-kit==4.1.0 isaacsim-app==4.1.0 --extra-index-url https://pypi.nvidia.com
     ```
@@ -51,7 +51,7 @@ The VLN-CE-Isaac Benchmark is a framework for evaluating Visual Language Navigat
 
 ## Data
 
-Download the data from huggingface and put them under `isaaclab_exts/omni.isaac.vlnce/assets` directory.
+Download the data from [huggingface](https://huggingface.co/datasets/Zhaojing/VLN-CE-Isaac) and put them under `isaaclab_exts/omni.isaac.vlnce/assets` directory.
 The expected file structure should be like:
 ```graphql
 isaaclab_exts/omni.isaac.vlnce
