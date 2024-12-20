@@ -81,7 +81,7 @@ def isaac_camera_data(env: BaseEnv, sensor_cfg: SceneEntityCfg, data_type: str) 
         # cv2.waitKey(1)
         return sensor.output[data_type].clone()
 
-def process_depth_image(env: BaseEnv, sensor_cfg: SceneEntityCfg, data_type: str, visualize=False) -> torch.Tensor:
+def process_depth_image(env: BaseEnv, sensor_cfg: SceneEntityCfg, data_type: str, visualize=False, far_clip: float=5.0, near_clip: float=0.3) -> torch.Tensor:
     """Process the depth image."""
     # import ipdb; ipdb.set_trace()
     # extract the used quantities (to enable type-hinting)
@@ -89,22 +89,23 @@ def process_depth_image(env: BaseEnv, sensor_cfg: SceneEntityCfg, data_type: str
 
     output = sensor.output[data_type].clone().unsqueeze(1)
     # # output = output[:,:, :-2, 4:-4]
-    near_clip = 0.3
-    far_clip = 2.0
+    # near_clip = 0.3
+    # far_clip = 5.0
+    # import pdb; pdb.set_trace()
     output[torch.isnan(output)] = far_clip
     output[torch.isinf(output)] = far_clip
 
     # depth_image_size = (output.shape[2], output.shape[3])
     # output_clone = output.clone().reshape(env.num_envs, depth_image_size[0], depth_image_size[1])[0,:,:]
     # window_name = "Before clipping"
-    # import ipdb; ipdb.set_trace()
+    # import pdb; pdb.set_trace()
     # cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     # cv2.imshow(window_name, output_clone.cpu().numpy())
     # cv2.waitKey(1)
 
     
-    output = torch.clip(output, near_clip, far_clip)
-    output = output - near_clip
+    # output = torch.clip(output, near_clip, far_clip)
+    # output = output - near_clip
     # output = F.interpolate(output, size=(53, 30), mode='nearest')
     # depth_image_size = (output.shape[2], output.shape[3])
     # output_clone = output.clone().reshape(env.num_envs, depth_image_size[0], depth_image_size[1])[0,:,:]
@@ -129,9 +130,9 @@ def process_depth_image(env: BaseEnv, sensor_cfg: SceneEntityCfg, data_type: str
         cv2.waitKey(1)
 
     # plt.imsave(path, output_clone.cpu().numpy(), cmap="gray")
-    
+    # import pdb; pdb.set_trace()
     # print(output)
-    return output.reshape(env.num_envs, -1)
+    return output
 
 def process_lidar(env: BaseEnv, sensor_cfg: SceneEntityCfg, offset: float = 0.5) -> torch.Tensor:
     """Process the lidar input."""
