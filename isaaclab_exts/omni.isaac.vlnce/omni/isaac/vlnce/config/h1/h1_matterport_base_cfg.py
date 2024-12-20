@@ -298,17 +298,17 @@ class TerrainSceneCfg(InteractiveSceneCfg):
     disk_1.init_state.pos = (0, 0, 2.6)
     disk_2.init_state.pos = (-1, 0, 2.6)
     # # camera
-    rgb_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/pelvis/rgb_camera",
-        offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.5), rot=(0.7, 0.0, 0.7, 0.0)),
+    rgbd_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/pelvis/rgbd_camera",
+        offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.5), rot=(-0.5, 0.5, -0.5, 0.5)),
         spawn=sim_utils.PinholeCameraCfg(horizontal_aperture=54.0),
         width=512,
         height=512,
-        data_types=["rgb"],
+        data_types=["rgb", "distance_to_image_plane"],
     )
     viz_rgb_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/pelvis/viz_rgb_camera",
-        offset=CameraCfg.OffsetCfg(pos=(-1.0, 0.0, 0.57), rot=(0.7, 0.0, 0.7, 0.0)),
+        offset=CameraCfg.OffsetCfg(pos=(-1.0, 0.0, 0.57), rot=(-0.5, 0.5, -0.5, 0.5)),
         spawn=sim_utils.PinholeCameraCfg(horizontal_aperture=100.0),
         width=512,
         height=512,

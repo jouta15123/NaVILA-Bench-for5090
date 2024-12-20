@@ -181,7 +181,7 @@ class ObservationsCfg:
         """Observations for camera group."""
         rgb_measurement = ObsTerm(
             func=mdp.isaac_camera_data,
-            params={"sensor_cfg": SceneEntityCfg("rgb_camera"), "data_type": "rgb"},
+            params={"sensor_cfg": SceneEntityCfg("rgbd_camera"), "data_type": "rgb"},
         )
 
         def __post_init__(self):
@@ -200,12 +200,25 @@ class ObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = True
 
+    @configclass
+    class DepthObsCfg(ObsGroup):
+        """Observations for visualization camera group."""
+        depth_measurement = ObsTerm(
+            func=mdp.process_depth_image,
+            params={"sensor_cfg": SceneEntityCfg("rgbd_camera"), "data_type": "distance_to_image_plane"},
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = True
+    
     # observation groups
     policy: PolicyCfg = PolicyCfg()
     proprio: ProprioCfg = ProprioCfg()
     critic: CriticObsCfg = CriticObsCfg()
     camera_obs: CameraObsCfg = CameraObsCfg()
     viz_camera_obs: VizCameraObsCfg = VizCameraObsCfg()
+    depth_obs: DepthObsCfg = DepthObsCfg()
 
 
 @configclass
@@ -312,17 +325,17 @@ class TerrainSceneCfg(InteractiveSceneCfg):
     disk_1.init_state.pos = (0, 0, 2.6)
     disk_2.init_state.pos = (-1, 0, 2.6)
     # # camera
-    rgb_camera = CameraCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/pelvis/rgb_camera",
-        offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.5), rot=(0.7, 0.0, 0.7, 0.0)),
+    rgbd_camera = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/Robot/pelvis/rgbd_camera",
+        offset=CameraCfg.OffsetCfg(pos=(0.1, 0.0, 0.5), rot=(-0.5, 0.5, -0.5, 0.5)),
         spawn=sim_utils.PinholeCameraCfg(horizontal_aperture=54.0),
         width=512,
         height=512,
-        data_types=["rgb"],
+        data_types=["rgb", "distance_to_image_plane"],
     )
     viz_rgb_camera = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/pelvis/viz_rgb_camera",
-        offset=CameraCfg.OffsetCfg(pos=(-1.0, 0.0, 0.57), rot=(0.7, 0.0, 0.7, 0.0)),
+        offset=CameraCfg.OffsetCfg(pos=(-1.0, 0.0, 0.57), rot=(-0.5, 0.5, -0.5, 0.5)),
         spawn=sim_utils.PinholeCameraCfg(horizontal_aperture=100.0),
         width=512,
         height=512,
