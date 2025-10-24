@@ -171,7 +171,7 @@ class VLNEnvWrapper:
 
         if "go2" in self.task_name:
             warmup_steps = 100
-        elif "h1" or "g1" in self.task_name:
+        elif ("h1" in self.task_name) or ("g1" in self.task_name):
             warmup_steps = 200
         else:
             warmup_steps = 50
@@ -182,7 +182,18 @@ class VLNEnvWrapper:
 
             self.update_command(zero_cmd)
             actions = self.low_level_policy(self.low_level_obs)
-            low_level_obs, _, _, infos = self.env.step(actions)
+            low_level_obs, _, dones, infos = self.env.step(actions)
+
+            # If the underlying env timed out or terminated during warmup, reset it and continue warming up
+            try:
+                has_any_done = bool(torch.any(dones))
+            except Exception:
+                # Fallback in case dones is not a tensor
+                has_any_done = bool(dones[0]) if isinstance(dones, (list, tuple)) else bool(dones)
+
+            if has_any_done:
+                low_level_obs, infos = self.env.reset()
+
             self.low_level_obs = low_level_obs
             self.low_level_action = actions
 
@@ -197,6 +208,14 @@ class VLNEnvWrapper:
 
         obs = infos["observations"][self.high_level_obs_key]
         return obs, infos
+    
+    @property
+    def action_space(self):
+        """Exposes a simple 3D continuous action space for high-level velocity commands.
+
+        This is used by callers (e.g., navila_interactive.py) to infer the command dimension.
+        """
+        return gym.spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
     
     def update_command(self, command) -> None:
         """Update the command for the low-level policy."""
