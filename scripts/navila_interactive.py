@@ -6,8 +6,6 @@
 """Interactive evaluation script that queries a VLM server with custom instructions."""
 
 import argparse
-import base64
-import io
 import json
 import math
 import os
@@ -16,7 +14,8 @@ import socket
 import sys
 import threading
 import time
-from typing import Callable, List, Optional
+from datetime import datetime
+from typing import Callable, List, Optional, Tuple, Sequence
 
 import gymnasium as gym
 import imageio
@@ -87,6 +86,40 @@ parser.add_argument("--visualize_path", action="store_true", default=False, help
 parser.add_argument("--vlm_host", type=str, default="localhost", help="Host running the VLM server.")
 parser.add_argument("--vlm_port", type=int, default=54321, help="Port for the VLM server.")
 parser.add_argument(
+    "--vlm_num_frames",
+    type=int,
+    default=8,
+    help="Number of video frames to send to the VLM per query.",
+)
+parser.add_argument(
+    "--auto_replan",
+    action="store_true",
+    help="Enable automatic replanning when progress is insufficient after a plan is executed.",
+)
+parser.add_argument(
+    "--replan_delta",
+    type=float,
+    default=0.25,
+    help="Plan 実行後に DistanceToGoal がこの値（メートル）以上改善していないと自動再計画します。",
+)
+parser.add_argument(
+    "--save_map_frames",
+    action="store_true",
+    help="各プラン時に可視化フレームを logs/navila_events/maps に保存します。",
+)
+parser.add_argument(
+    "--scene_id_override",
+    type=str,
+    default=None,
+    help="Force selection of episodes from the specified Matterport scene (e.g., '17DRP5sb8fy').",
+)
+parser.add_argument(
+    "--scene_usd",
+    type=str,
+    default=None,
+    help="Absolute or relative path to a USD file to load instead of the dataset scene.",
+)
+parser.add_argument(
     "--instruction",
     type=str,
     default=None,
@@ -123,7 +156,12 @@ parser.add_argument(
     default=os.path.join(REPO_ROOT, "isaaclab_exts", "omni.isaac.vlnce", "assets", "vln_ce_isaac_v1.json.gz"),
     help="Path to the R2R episode JSON (gzipped).",
 )
-parser.add_argument("--episode_idx", type=int, default=0, help="Episode index to load from the dataset.")
+parser.add_argument(
+    "--episode_idx",
+    type=int,
+    default=0,
+    help="Episode index to load. With --scene_id_override, this is the index within matching episodes.",
+)
 parser.add_argument(
     "--max_runtime",
     type=float,
@@ -160,11 +198,25 @@ from omni.isaac.vlnce.utils import (
     RslRlVecEnvHistoryWrapper,
     VLNEnvWrapper,
     add_instruction_on_img,
-    get_vel_command,
     read_episodes,
 )
 from omni.isaac.vlnce.config import *  # noqa: F403,F401
 from omni.isaac.vlnce.utils.measures import MeasureManager, PathLength, DistanceToGoal, Success, SPL
+
+from navila_vla_utils import (
+    ActionCommand,
+    commands_cover_expected,
+    commands_to_dicts,
+    commands_to_velocity_plan,
+    encode_images_to_base64,
+    extract_distance_to_goal,
+    parse_instruction_to_commands,
+    parse_vlm_response,
+    quantise_commands,
+    sample_and_pad_images,
+    save_map_image,
+    summarize_commands,
+)
 
 
 def quat2eulers(q0: float, q1: float, q2: float, q3: float):
@@ -175,10 +227,25 @@ def quat2eulers(q0: float, q1: float, q2: float, q3: float):
     return roll, pitch, yaw
 
 
+def normalize_scene_id(scene_path: str) -> str:
+    """Return the scene identifier without directory or extension."""
+    return os.path.splitext(os.path.basename(scene_path))[0]
+
+
 def reset_start_pos_rot(env_cfg, instruction_episode):
     """Adjust environment configuration using the selected episode."""
-    scene_id = os.path.splitext(os.path.basename(instruction_episode["scene_id"]))[0]
-    env_cfg.scene.terrain.obj_filepath = os.path.join(ASSETS_DIR, f"matterport_usd/{scene_id}/{scene_id}.usd")
+    scene_id = normalize_scene_id(instruction_episode["scene_id"])
+
+    if args_cli.scene_usd:
+        usd_path = os.path.abspath(args_cli.scene_usd)
+        if not os.path.exists(usd_path):
+            raise FileNotFoundError(f"USD file not found: {usd_path}")
+        env_cfg.scene.terrain.obj_filepath = usd_path
+    else:
+        default_usd = os.path.join(ASSETS_DIR, f"matterport_usd/{scene_id}/{scene_id}.usd")
+        if not os.path.exists(default_usd):
+            raise FileNotFoundError(f"USD file not found: {default_usd}")
+        env_cfg.scene.terrain.obj_filepath = default_usd
 
     start_pos = instruction_episode["start_position"]
     start_rot = instruction_episode["start_rotation"]
@@ -206,44 +273,22 @@ def sample_images_and_send_to_vlm(
     vlm_host: str,
     vlm_port: int,
     query: str,
+    num_frames: int,
 ) -> Optional[str]:
     """Send sampled images alongside the query to the VLM server."""
     if len(image_list) == 0:
         print("Did not receive any images.")
         return None
-    elif len(image_list) < 8:
-        print("Not enough images received, padding.")
-        image_list = image_list.copy()
-        for _ in range(8 - len(image_list)):
-            image_list.insert(0, Image.new("RGB", image_list[-1].size, (0, 0, 0)))
-    else:
-        image_list = image_list.copy()
 
-    num_images = len(image_list)
-    indices = [int(i * (num_images - 1) / 7) for i in range(7)]
-    sampled_images = [image_list[i] for i in indices]
-    sampled_images.append(image_list[-1])
+    sampled_images = sample_and_pad_images(image_list, num_frames=num_frames)
+    encoded_images = encode_images_to_base64(sampled_images)
 
-    encoded_images: List[str] = []
-    for image in sampled_images:
-        if isinstance(image, np.ndarray):
-            array_image = image
-            if array_image.dtype != np.uint8:
-                if array_image.max() <= 1.0:
-                    array_image = (array_image * 255.0).clip(0, 255).astype(np.uint8)
-                else:
-                    array_image = array_image.clip(0, 255).astype(np.uint8)
-            pil_image = Image.fromarray(array_image)
-        elif isinstance(image, Image.Image):
-            pil_image = image
-        else:
-            pil_image = Image.fromarray(np.array(image, dtype=np.uint8))
-
-        buffered = io.BytesIO()
-        pil_image.save(buffered, format="JPEG")
-        encoded_images.append(base64.b64encode(buffered.getvalue()).decode())
-
-    request_data = {"images": encoded_images, "query": query}
+    history_frames = max(0, len(sampled_images) - 1)
+    request_data = {
+        "images": encoded_images,
+        "query": query,
+        "history_frames": history_frames,
+    }
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((vlm_host, vlm_port))
@@ -266,6 +311,16 @@ def sample_images_and_send_to_vlm(
         return None
     response = json.loads(response_data.decode())
     return response
+
+
+def log_vlm_decision(log_dir: str, record: dict) -> None:
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "interactive.jsonl")
+    with open(log_file, "a", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False)
+        f.write("\n")
+
+
 
 
 def add_measurement(env, episode):
@@ -404,17 +459,46 @@ def build_instruction_provider() -> InstructionProvider:
     return InstructionProvider()
 
 
+def _build_plan_from_commands(
+    commands: List[ActionCommand],
+    env,
+) -> List[Tuple[torch.Tensor, int]]:
+    velocity_plan = commands_to_velocity_plan(commands)
+    step_duration = env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
+    plan: List[Tuple[torch.Tensor, int]] = []
+    for velocity, duration in velocity_plan:
+        steps = 1
+        if duration > 0:
+            steps = max(1, int(math.ceil(duration / step_duration)))
+        command_tensor = torch.tensor(velocity, device=env.unwrapped.device, dtype=torch.float32)
+        plan.append((command_tensor, steps))
+    return plan
+
+
+def _decode_vlm_to_plan(
+    vlm_text: str,
+    env,
+) -> Tuple[List[Tuple[torch.Tensor, int]], List[ActionCommand]]:
+    commands: List[ActionCommand] = parse_vlm_response(vlm_text)
+    if not commands:
+        return [], []
+    commands = quantise_commands(commands)
+    plan = _build_plan_from_commands(commands, env)
+    return plan, commands
+
+
 def query_vlm_and_prepare_command(
     instruction_text: str,
     image_observations: List[Image.Image],
     env,
-) -> Optional[tuple[str, torch.Tensor, int]]:
+) -> Optional[tuple[str, List[Tuple[torch.Tensor, int]], List[ActionCommand], bool]]:
     """Send instruction to VLM and convert its response into velocity commands."""
     response = sample_images_and_send_to_vlm(
         image_observations,
         args_cli.vlm_host,
         args_cli.vlm_port,
         instruction_text,
+        args_cli.vlm_num_frames,
     )
     if response is None:
         print("VLM から応答が得られませんでした。停止します。")
@@ -428,13 +512,24 @@ def query_vlm_and_prepare_command(
         print("VLM 応答が空です。停止します。")
         return None
 
-    vlm_vel_commands, time_to_go = get_vel_command(vlm_text)
-    steps = max(
-        1,
-        int(time_to_go / (env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation)),
-    )
-    command_tensor = torch.tensor(vlm_vel_commands, device=env.unwrapped.device, dtype=torch.float32)
-    return vlm_text, command_tensor, steps
+    plan, commands = _decode_vlm_to_plan(vlm_text, env)
+    fallback_used = False
+    fallback_commands = parse_instruction_to_commands(instruction_text)
+    if fallback_commands:
+        fallback_commands = quantise_commands(fallback_commands)
+        if not commands_cover_expected(fallback_commands, commands):
+            print(
+                "VLM 応答が指示と一致しないためフォールバックコマンドを使用します。"
+            )
+            commands = fallback_commands
+            plan = _build_plan_from_commands(commands, env)
+            fallback_used = True
+
+    if not plan:
+        print("VLM 応答から有効なコマンドを抽出できませんでした。")
+        return None
+
+    return vlm_text, plan, commands, fallback_used
 
 
 def main():
@@ -445,8 +540,36 @@ def main():
     r2r_path = os.path.abspath(r2r_path)
 
     all_episodes = read_episodes(r2r_path)
-    assert 0 <= args_cli.episode_idx < len(all_episodes), "Episode index out of range."
-    episode = all_episodes[args_cli.episode_idx]
+
+    selected_dataset_idx = args_cli.episode_idx
+    filtered_count = None
+
+    if args_cli.scene_id_override:
+        target_scene = args_cli.scene_id_override.strip()
+        matching_indices = [
+            idx for idx, ep in enumerate(all_episodes) if normalize_scene_id(ep["scene_id"]) == target_scene
+        ]
+        if not matching_indices:
+            raise ValueError(
+                f"No episodes found in dataset for scene_id '{target_scene}'. "
+                "Please verify the ID or update the dataset."
+            )
+        filtered_count = len(matching_indices)
+        if args_cli.episode_idx >= filtered_count:
+            raise ValueError(
+                f"--episode_idx={args_cli.episode_idx} exceeds available episodes ({filtered_count}) "
+                f"for scene '{target_scene}'."
+            )
+        selected_dataset_idx = matching_indices[args_cli.episode_idx]
+        print(
+            f"[INFO] Using episode {args_cli.episode_idx} (dataset index {selected_dataset_idx}) "
+            f"within scene '{target_scene}' ({filtered_count} available)."
+        )
+
+    if not (0 <= selected_dataset_idx < len(all_episodes)):
+        raise ValueError("Episode index out of range.")
+
+    episode = all_episodes[selected_dataset_idx]
 
     instruction_provider = build_instruction_provider()
 
@@ -505,11 +628,36 @@ def main():
     MAX_IMAGE_HISTORY = 64
     image_observations: List[Image.Image] = [Image.fromarray(init_frame)]
 
-    overlay_text = "指示待ち..."
+    overlay_text = "Awaiting instruction..."
     init_cam_disp = init_frame.copy()
     init_viz_disp = vis_frame.copy()
     add_instruction_on_img(init_cam_disp, overlay_text)
     rgb_obses = [np.concatenate([init_cam_disp, init_viz_disp], axis=1)]
+
+    instruction_video_root = os.path.join(PROJECT_ROOT, "..", "logs", "navila_events", "interactive_clips")
+    os.makedirs(instruction_video_root, exist_ok=True)
+    segment_frames: List[np.ndarray] = []
+    segment_tag: Optional[str] = None
+    recording_active = False
+    instruction_counter = 0
+
+    def flush_segment_video() -> None:
+        nonlocal segment_frames, segment_tag, recording_active
+        if segment_frames and segment_tag:
+            output_path = os.path.join(instruction_video_root, f"{segment_tag}.mp4")
+            try:
+                with imageio.get_writer(output_path, fps=10) as writer:
+                    for frame in segment_frames:
+                        writer.append_data(frame)
+                print(f"[INFO] Saved instruction clip: {output_path}")
+            except Exception as exc:
+                print(f"[WARN] Failed to save clip {segment_tag}: {exc}")
+        segment_frames = []
+        segment_tag = None
+        recording_active = False
+
+    latest_cam_disp = init_cam_disp.copy()
+    latest_viz_disp = init_viz_disp.copy()
 
     num_steps = 0
     start_time = time.time()
@@ -518,38 +666,88 @@ def main():
     last_instruction_text = ""
     current_command = torch.zeros(env.action_space.shape[-1], device=env.unwrapped.device, dtype=torch.float32)
     command_steps_remaining = 0
+    command_queue: List[Tuple[torch.Tensor, int]] = []
+    stop_plan_active = False
     prompt_shown = False
 
-    measurements = {}
+    LOG_DIR = os.path.join(PROJECT_ROOT, "..", "logs", "navila_events")
+    measurements = infos.get("measurements", {}) if isinstance(infos, dict) else {}
+    last_distance = extract_distance_to_goal(measurements)
+    PROGRESS_DELTA = args_cli.replan_delta
+    plan_counter = 0
+    current_plan_start_distance = last_distance
+    current_plan_instruction: Optional[str] = None
+
     infos = {}
 
     while simulation_app.is_running():
         simulation_app.update()
         if command_steps_remaining <= 0:
-            instruction_text = instruction_provider.get_instruction()
-            if instruction_text is None:
-                print("指示入力が終了したためシミュレーションを停止します。")
-                break
-            if instruction_text:
-                prompt_shown = False  # reset prompt flag on new instruction
-                last_instruction_text = instruction_text
-                result = query_vlm_and_prepare_command(instruction_text, image_observations, env)
-                if result is None:
-                    break
-                vlm_response_cache, current_command, command_steps_remaining = result
-                overlay_text = f"指示: {last_instruction_text}\nVLM: {vlm_response_cache}"
-                print(
-                    f"VLM output: {vlm_response_cache}\n"
-                    f"Vel Command: {current_command.cpu().numpy().tolist()}, Env Steps remaining: {command_steps_remaining}\n"
-                )
+            if command_queue:
+                current_command, command_steps_remaining = command_queue.pop(0)
             else:
-                # keep stepping with zero command while waiting
-                current_command.zero_()
-                overlay_text = "指示待ち..."
-                if not prompt_shown and getattr(instruction_provider, "mode", None) == "stdin":
-                    print("instruction:")
-                    prompt_shown = True
-                command_steps_remaining = 1
+                instruction_text = instruction_provider.get_instruction()
+                if instruction_text is None:
+                    print("指示入力が終了したためシミュレーションを停止します。")
+                    break
+                if instruction_text:
+                    if recording_active:
+                        flush_segment_video()
+                    instruction_counter += 1
+                    prompt_shown = False  # reset prompt flag on new instruction
+                    last_instruction_text = instruction_text
+                    result = query_vlm_and_prepare_command(instruction_text, image_observations, env)
+                    if result is None:
+                        break
+                    vlm_response_cache, plan, commands, fallback_used = result
+                    command_queue.extend(plan)
+                    stop_plan_active = all(cmd.kind == "stop" for cmd in commands)
+                    current_command, command_steps_remaining = command_queue.pop(0)
+                    plan_counter += 1
+                    segment_tag = f"instruction_{instruction_counter:03d}"
+                    segment_frames = []
+                    recording_active = True
+                    current_plan_start_distance = last_distance
+                    current_plan_instruction = last_instruction_text
+                    overlay_text = f"Instruction: {last_instruction_text}\nVLM: {vlm_response_cache}"
+                    print(
+                        f"VLM output: {vlm_response_cache}\n"
+                        f"Queued segments: {len(plan)} | Executing first for {command_steps_remaining} steps\n"
+                    )
+                    print(f"Plan #{plan_counter}: {summarize_commands(commands)}")
+                    log_vlm_decision(
+                        LOG_DIR,
+                        {
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "event": "user_instruction",
+                            "instruction": instruction_text,
+                            "vlm_output": vlm_response_cache,
+                            "commands": commands_to_dicts(commands),
+                            "fallback_used": fallback_used,
+                            "command_segments": len(plan),
+                            "distance_to_goal": last_distance,
+                        },
+                    )
+                    if args_cli.save_map_frames:
+                        save_map_image(
+                            LOG_DIR,
+                            latest_cam_disp,
+                            latest_viz_disp,
+                            f"plan_{plan_counter}",
+                            subdir="maps_interactive",
+                        )
+                else:
+                    # keep stepping with zero command while waiting
+                    if recording_active:
+                        flush_segment_video()
+                    last_instruction_text = ""
+                    current_plan_instruction = None
+                    current_command.zero_()
+                    overlay_text = "Awaiting instruction..."
+                    if not prompt_shown and getattr(instruction_provider, "mode", None) == "stdin":
+                        print("instruction:")
+                        prompt_shown = True
+                    command_steps_remaining = 1
 
         with torch.inference_mode():
             obs, _, done, infos = env.step(current_command)
@@ -563,6 +761,67 @@ def main():
         if time.time() - start_time > args_cli.max_runtime:
             print("最大実行時間に達したため終了します。")
             break
+
+        current_distance = extract_distance_to_goal(measurements)
+        if current_distance is not None:
+            last_distance = current_distance
+
+        if (
+            args_cli.auto_replan
+            and last_instruction_text
+            and not command_queue
+            and command_steps_remaining == 0
+            and current_plan_instruction == last_instruction_text
+        ):
+            if (
+                current_plan_start_distance is not None
+                and current_distance is not None
+                and current_plan_start_distance - current_distance < PROGRESS_DELTA
+            ):
+                print("進捗が不十分のため自動再計画します。")
+                result = query_vlm_and_prepare_command(last_instruction_text, image_observations, env)
+                if result is None:
+                    break
+                vlm_response_cache, plan, commands, fallback_used = result
+                command_queue.extend(plan)
+                stop_plan_active = all(cmd.kind == "stop" for cmd in commands)
+                last_plan_had_stop = any(cmd.kind == "stop" for cmd in commands)
+                if command_queue:
+                    current_command, command_steps_remaining = command_queue.pop(0)
+                plan_counter += 1
+                current_plan_start_distance = current_distance
+                overlay_text = f"Instruction: {last_instruction_text}\nVLM: {vlm_response_cache}"
+                print(f"Replan #{plan_counter}: {summarize_commands(commands)}")
+                log_vlm_decision(
+                    LOG_DIR,
+                    {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "event": "auto_replan",
+                        "instruction": last_instruction_text,
+                        "vlm_output": vlm_response_cache,
+                        "commands": commands_to_dicts(commands),
+                        "fallback_used": fallback_used,
+                        "command_segments": len(plan),
+                        "distance_to_goal": current_distance,
+                    },
+                )
+                if args_cli.save_map_frames:
+                    save_map_image(
+                        LOG_DIR,
+                        latest_cam_disp,
+                        latest_viz_disp,
+                        f"replan_{plan_counter}",
+                        subdir="maps_interactive",
+                    )
+                current_plan_instruction = last_instruction_text
+                continue
+            else:
+                current_plan_instruction = None
+                current_plan_start_distance = current_distance
+
+        if not command_queue and command_steps_remaining == 0:
+            current_plan_instruction = None
+            current_plan_start_distance = current_distance if current_distance is not None else last_distance
 
         camera_frame = infos["observations"]["camera_obs"][0, :, :, :3].cpu().numpy()
         viz_frame_step = infos["observations"]["viz_camera_obs"][0, :, :, :3].cpu().numpy()
@@ -578,12 +837,23 @@ def main():
             if overlay_text:
                 add_instruction_on_img(cam_disp, overlay_text)
                 add_instruction_on_img(viz_disp, overlay_text)
-            rgb_obses.append(np.concatenate([cam_disp, viz_disp], axis=1))
+            combined_frame = np.concatenate([cam_disp, viz_disp], axis=1)
+            rgb_obses.append(combined_frame)
+            if segment_tag is not None:
+                segment_frames.append(combined_frame.astype(np.uint8))
+            latest_cam_disp = cam_disp
+            latest_viz_disp = viz_disp
 
         command_steps_remaining = max(command_steps_remaining - 1, 0)
 
+        if stop_plan_active and not command_queue and command_steps_remaining == 0:
+            env.set_stop_called(True)
+            stop_plan_active = False
+
+
         num_steps += 1
 
+    flush_segment_video()
     print("[INFO] Final measurements:", json.dumps(measurements, indent=2))
 
     instruction_provider.shutdown()
