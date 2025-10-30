@@ -2,3 +2,20 @@
 isaaclab_exts/omni.isaac.vlnce/assets
 *.pyc
 *.egg-info
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# OS/editor junk
+.DS_Store
+.idea/
+
+# Experiment/eval outputs
+eval_results/
+logs/
+logs/height_maps/
+
+original_scripts/
+eval_results/
+# Local environment or secrets
+.env

@@ -18,10 +18,11 @@ import numpy as np
 import imageio
 from PIL import Image
 import time
-import base64
-import io
 import socket
-import json
+import queue
+import threading
+from datetime import datetime
+from typing import List, Tuple, Optional
 
 # ensure local extensions (omni.isaac.vlnce, etc.) are on the import path when launched via isaaclab.sh
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -84,6 +85,54 @@ parser.add_argument("--visualize_path", action="store_true", default=False, help
 # navila argparse arguments
 parser.add_argument("--vlm_host", type=str, default="localhost")
 parser.add_argument("--vlm_port", type=int, default=54321)
+parser.add_argument("--instruction", type=str, default=None, help="Custom instruction text. If provided, overrides episode instruction.")
+parser.add_argument(
+    "--instruction_file",
+    type=str,
+    default=None,
+    help="Optional path to a text file containing the instruction string.",
+)
+parser.add_argument(
+    "--instruction_mode",
+    type=str,
+    choices=["stdin", "socket"],
+    default=None,
+    help="Instruction input mode. Default: auto (stdin if TTY, otherwise socket server).",
+)
+parser.add_argument(
+    "--instruction_host",
+    type=str,
+    default="127.0.0.1",
+    help="Host/IP to bind the instruction socket server (when instruction_mode=socket).",
+)
+parser.add_argument(
+    "--instruction_port",
+    type=int,
+    default=5557,
+    help="Port for the instruction socket server (when instruction_mode=socket).",
+)
+parser.add_argument(
+    "--auto_replan",
+    action="store_true",
+    help="Enable automatic replanning when a plan finishes with insufficient progress.",
+)
+parser.add_argument(
+    "--replan_delta",
+    type=float,
+    default=0.25,
+    help="Plan 実行後に DistanceToGoal がこの値（メートル）以上改善していない場合に再計画します。",
+)
+parser.add_argument(
+    "--save_map_frames",
+    action="store_true",
+    help="各プラン時の可視化フレームを logs/navila_events/maps に保存します。",
+)
+parser.add_argument(
+    "--vlm_num_frames",
+    type=int,
+    default=8,
+    help="Number of video frames to send to the VLM per query.",
+)
 
 
 # r2r argparse arguments
@@ -117,12 +166,27 @@ import isaaclab.sim as sim_utils
 from omni.isaac.vlnce.config import *
 from omni.isaac.vlnce.utils import ASSETS_DIR, RslRlVecEnvHistoryWrapper, VLNEnvWrapper
 from omni.isaac.vlnce.utils.eval_utils import (
-    get_vel_command, 
-    read_episodes, 
+    get_vel_command,
+    read_episodes,
     add_instruction_on_img,
-    InstructionData, 
+    InstructionData,
 )
 from omni.isaac.vlnce.utils.measures import PathLength, DistanceToGoal, Success, SPL, OracleNavigationError, OracleSuccess, MeasureManager
+
+from navila_vla_utils import (
+    ActionCommand,
+    commands_cover_expected,
+    commands_to_dicts,
+    commands_to_velocity_plan,
+    encode_images_to_base64,
+    extract_distance_to_goal,
+    parse_instruction_to_commands,
+    parse_vlm_response,
+    quantise_commands,
+    sample_and_pad_images,
+    save_map_image,
+    summarize_commands,
+)
 
 
 def quat2eulers(q0, q1, q2, q3):
@@ -197,80 +261,234 @@ def sample_images_and_send_to_vlm(image_list, vlm_host, vlm_port, query):
     if len(image_list) == 0:
         print("Did not receive any images.")
         return None
-    elif len(image_list) < 8:
-        print("Not enough images received, padding.")
-        image_list = image_list.copy()
-        # append image value=0, in front of the existing images, image size equal to the last one
-        for _ in range(8 - len(image_list)):
-            image_list.insert(0, Image.new('RGB', image_list[-1].size, (0, 0, 0)))
-    else:
-        image_list = image_list.copy()
-        
-    num_images = len(image_list)
-    indices = [int(i * (num_images - 1) / 7) for i in range(7)]
-    sampled_images = [image_list[i] for i in indices]
-    sampled_images.append(image_list[-1])
 
-    # save sampled images
-    # time_stamp = time.strftime("%Y%m%d-%H%M%S")
-    # if not os.path.exists("test_images"):
-    #     os.makedirs("test_images")
-    # for i, img in enumerate(sampled_images):
-    #     # convert to PIL Image
-    #     img = Image.fromarray(img)
-    #     img.save(os.path.join("test_images", f"{time_stamp}_image_{i}.jpg"))
+    sampled_images = sample_and_pad_images(image_list, num_frames=args_cli.vlm_num_frames)
+    encoded_images = encode_images_to_base64(sampled_images)
 
-    # Convert images to base64 for transmission
-    encoded_images = []
-    for image in sampled_images:
-        # Ensure PIL Image for JPEG encoding
-        if isinstance(image, np.ndarray):
-            array_image = image
-            if array_image.dtype != np.uint8:
-                # Convert to uint8. If values are 0-1, scale; otherwise clip to 0-255
-                if array_image.max() <= 1.0:
-                    array_image = (array_image * 255.0).clip(0, 255).astype(np.uint8)
-                else:
-                    array_image = array_image.clip(0, 255).astype(np.uint8)
-            pil_image = Image.fromarray(array_image)
-        elif isinstance(image, Image.Image):
-            pil_image = image
-        else:
-            # Fallback: try to construct a PIL image from whatever object is provided
-            pil_image = Image.fromarray(np.array(image, dtype=np.uint8))
-
-        buffered = io.BytesIO()
-        pil_image.save(buffered, format="JPEG")
-        encoded_images.append(base64.b64encode(buffered.getvalue()).decode())
-
-    # Prepare request data
     request_data = {
-        'images': encoded_images,
-        'query': query
+        "images": encoded_images,
+        "query": query,
+        "history_frames": max(0, len(sampled_images) - 1),
     }
 
-    # Send to VLM server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.connect((vlm_host, vlm_port))
-        
-        # Send data
         data_bytes = json.dumps(request_data).encode()
-        s.sendall(len(data_bytes).to_bytes(8, 'big'))
+        s.sendall(len(data_bytes).to_bytes(8, "big"))
         s.sendall(data_bytes)
-        
-        # Receive response
+
         size_data = s.recv(8)
-        size = int.from_bytes(size_data, 'big')
-        
-        response_data = b''
+        if not size_data:
+            return None
+        size = int.from_bytes(size_data, "big")
+
+        response_data = b""
         while len(response_data) < size:
             packet = s.recv(4096)
             if not packet:
                 break
             response_data += packet
-            
+
+        if not response_data:
+            return None
+
         response = json.loads(response_data.decode())
         return response
+
+
+def log_vlm_decision(log_dir: str, record: dict) -> None:
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "eval.jsonl")
+    with open(log_file, "a", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False)
+        f.write("\n")
+
+
+class InstructionProvider:
+    """Utility that supplies instructions from stdin or a socket server."""
+
+    def __init__(self):
+        self.queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self.stop_event = threading.Event()
+
+        if args_cli.instruction_file:
+            with open(args_cli.instruction_file, "r", encoding="utf-8") as file:
+                text = file.read().strip()
+                if text:
+                    self.queue.put(text)
+        elif args_cli.instruction:
+            self.queue.put(args_cli.instruction.strip())
+
+        resolved_mode = args_cli.instruction_mode
+        if resolved_mode is None:
+            resolved_mode = "stdin" if sys.stdin.isatty() else "socket"
+        self.mode = resolved_mode
+
+        if self.mode == "stdin":
+            self.thread = threading.Thread(target=self._stdin_loop, name="InstructionStdin", daemon=True)
+            self.thread.start()
+            print("[INFO] Instruction mode: stdin. Enter commands in this terminal. Type 'exit' to quit.")
+        else:
+            self._server_socket: Optional[socket.socket] = None
+            self.thread = threading.Thread(target=self._socket_loop, name="InstructionSocket", daemon=True)
+            self.thread.start()
+            print(
+                f"[INFO] Instruction mode: socket. Connect via 'nc {args_cli.instruction_host} {args_cli.instruction_port}' "
+                "and send commands. Type 'exit' to terminate."
+            )
+
+    def _stdin_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                line = sys.stdin.readline()
+            except Exception:
+                break
+            if line == "":
+                if self.stop_event.is_set():
+                    break
+                time.sleep(0.1)
+                continue
+            text = line.strip()
+            if not text:
+                print("空行は無視しました。終了するには 'exit' と入力してください。")
+                continue
+            if text.lower() in {"exit", "quit"}:
+                self.queue.put(None)
+                break
+            self.queue.put(text)
+
+    def _socket_loop(self):
+        host = args_cli.instruction_host
+        port = args_cli.instruction_port
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((host, port))
+            server.listen()
+            self._server_socket = server
+            while not self.stop_event.is_set():
+                try:
+                    server.settimeout(1.0)
+                    conn, addr = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                with conn:
+                    buffer = b""
+                    while not self.stop_event.is_set():
+                        try:
+                            data = conn.recv(1024)
+                        except ConnectionResetError:
+                            break
+                        if not data:
+                            break
+                        buffer += data
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            text = line.decode("utf-8", errors="ignore").strip()
+                            if not text:
+                                continue
+                            if text.lower() in {"exit", "quit"}:
+                                self.queue.put(None)
+                                self.stop_event.set()
+                                conn.close()
+                                break
+                            self.queue.put(text)
+                        if self.stop_event.is_set():
+                            break
+
+    def get_instruction(self) -> Optional[str]:
+        try:
+            instruction = self.queue.get(timeout=0.1)
+            return instruction
+        except queue.Empty:
+            return ""
+
+    def wait_for_instruction(self) -> Optional[str]:
+        while not self.stop_event.is_set():
+            try:
+                instruction = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            return instruction
+        return None
+
+    def shutdown(self):
+        self.stop_event.set()
+        if self.mode == "socket" and self._server_socket:
+            try:
+                # Wake up accept()
+                with socket.create_connection((args_cli.instruction_host, args_cli.instruction_port), timeout=0.5):
+                    pass
+            except Exception:
+                pass
+
+
+def build_instruction_provider() -> InstructionProvider:
+    """Create an instruction provider instance."""
+    if args_cli.instruction and args_cli.instruction_file:
+        raise ValueError("--instruction と --instruction_file は同時に指定できません。")
+    return InstructionProvider()
+
+
+def _build_plan_from_commands(commands: List[ActionCommand], env) -> List[Tuple[torch.Tensor, int]]:
+    velocity_plan = commands_to_velocity_plan(commands)
+    step_duration = env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
+    plan: List[Tuple[torch.Tensor, int]] = []
+    for velocity, duration in velocity_plan:
+        steps = 1
+        if duration > 0:
+            steps = max(1, int(math.ceil(duration / step_duration)))
+        command_tensor = torch.tensor(velocity, device=env.unwrapped.device, dtype=torch.float32)
+        plan.append((command_tensor, steps))
+    return plan
+
+
+def _decode_vlm_to_plan(vlm_text: str, env) -> Tuple[List[Tuple[torch.Tensor, int]], List[ActionCommand]]:
+    commands: List[ActionCommand] = parse_vlm_response(vlm_text)
+    if not commands:
+        return [], []
+    commands = quantise_commands(commands)
+    plan = _build_plan_from_commands(commands, env)
+    return plan, commands
+
+
+def query_vlm_and_prepare_command(
+    instruction_text: str,
+    image_observations: List[Image.Image],
+    env,
+) -> Optional[tuple[str, List[Tuple[torch.Tensor, int]], List[ActionCommand], bool]]:
+    response = sample_images_and_send_to_vlm(
+        image_observations,
+        args_cli.vlm_host,
+        args_cli.vlm_port,
+        instruction_text,
+    )
+    if response is None:
+        print("VLM から応答が得られませんでした。停止します。")
+        return None
+
+    vlm_text = response.get("response", "") if isinstance(response, dict) else str(response)
+    if not vlm_text:
+        print("VLM 応答が空です。停止します。")
+        return None
+
+    plan, commands = _decode_vlm_to_plan(vlm_text, env)
+    fallback_used = False
+    fallback_commands = parse_instruction_to_commands(instruction_text)
+    if fallback_commands:
+        fallback_commands = quantise_commands(fallback_commands)
+        if not commands_cover_expected(fallback_commands, commands):
+            print("VLM 応答が指示と一致しないためフォールバックコマンドを使用します。")
+            commands = fallback_commands
+            plan = _build_plan_from_commands(commands, env)
+            fallback_used = True
+
+    if not plan:
+        print("VLM 応答から有効なコマンドを抽出できませんでした。")
+        return None
+
+    return vlm_text, plan, commands, fallback_used
 
 
 def main():
@@ -343,7 +561,36 @@ def main():
     rgb_obs = infos["observations"]["camera_obs"]
     init_frame = rgb_obs[0, :, :, :3].cpu().numpy()
     # init_frame = cv2.rotate(init_frame, cv2.ROTATE_90_CLOCKWISE)
-    instruction = InstructionData(**episode["instruction"])
+    
+    # Set up instruction provider if interactive mode is requested
+    # Interactive mode if: no instruction/instruction_file provided AND (instruction_mode is stdin OR stdin is TTY)
+    use_interactive = (args_cli.instruction is None and 
+                       args_cli.instruction_file is None and
+                       (args_cli.instruction_mode == "stdin" or 
+                        (args_cli.instruction_mode is None and sys.stdin.isatty())))
+    
+    if use_interactive:
+        instruction_provider = build_instruction_provider()
+        print("[INFO] Interactive mode enabled. Waiting for initial instruction...")
+        # Wait for initial instruction
+        initial_instruction = instruction_provider.wait_for_instruction()
+        if initial_instruction is None:
+            print("No instruction provided. Exiting.")
+            return
+        instruction = InstructionData(instruction_text=initial_instruction)
+    else:
+        instruction_provider = None
+        # Use custom instruction if provided, otherwise use episode instruction
+        if args_cli.instruction is not None:
+            instruction_text = args_cli.instruction
+            instruction = InstructionData(instruction_text=instruction_text)
+        elif args_cli.instruction_file:
+            with open(args_cli.instruction_file, "r", encoding="utf-8") as f:
+                instruction_text = f.read().strip()
+            instruction = InstructionData(instruction_text=instruction_text)
+        else:
+            instruction = InstructionData(**episode["instruction"])
+    
     image_observations = []
     image_observations.append(Image.fromarray(init_frame))
 
@@ -358,21 +605,54 @@ def main():
     same_pos_count = 0
     prev_pos = env.unwrapped.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
     max_episode_steps = 100 * 0.5 / (env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation)
-    # visualizer = define_markers()
+    vlm_response_cache = ""
+    vlm_vel_commands = [0.0, 0.0, 0.0]
+    env_steps_to_go = 0
+    current_instruction = instruction.instruction_text
+
     # simulate environment
     while simulation_app.is_running():
+        simulation_app.update()
+        
+        # Check for new instruction in interactive mode
+        if use_interactive and instruction_provider:
+            new_instruction = instruction_provider.get_instruction()
+            if new_instruction is None:
+                print("指示入力が終了したためシミュレーションを停止します。")
+                break
+            elif new_instruction:
+                # New instruction received, update and reset target_steps to query VLM immediately
+                current_instruction = new_instruction
+                instruction = InstructionData(instruction_text=new_instruction)
+                target_steps = num_steps  # Force immediate VLM query
+                print(f"[INFO] New instruction: {new_instruction}")
+        
         # run everything in inference mode
         with torch.inference_mode():
             if num_steps == target_steps:
-                stream_output = sample_images_and_send_to_vlm(image_observations, args_cli.vlm_host, args_cli.vlm_port, instruction.instruction_text)
-                vlm_vel_commands, time_to_go = get_vel_command(stream_output)
-                env_steps_to_go = int(time_to_go / (
-                    env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
-                ))
-                target_steps = num_steps + env_steps_to_go
-                print(f"VLM output: {stream_output}\nVel Command: {vlm_vel_commands}, Env Steps to go: {env_steps_to_go}\n")
+                stream_output = sample_images_and_send_to_vlm(image_observations, args_cli.vlm_host, args_cli.vlm_port, current_instruction)
+                if stream_output:
+                    # Handle both string and dict responses
+                    if isinstance(stream_output, dict):
+                        vlm_text = stream_output.get("response", "")
+                    else:
+                        vlm_text = str(stream_output)
+                    if vlm_text:
+                        vlm_vel_commands, time_to_go = get_vel_command(vlm_text)
+                        env_steps_to_go = int(time_to_go / (
+                            env.unwrapped.cfg.sim.dt * env.unwrapped.cfg.decimation
+                        ))
+                        target_steps = num_steps + env_steps_to_go
+                        vlm_response_cache = vlm_text
+                        print(f"VLM output: {vlm_text}\nVel Command: {vlm_vel_commands}, Env Steps to go: {env_steps_to_go}\n")
+                    else:
+                        print("VLM応答が空です。")
+                        break
+                else:
+                    print("VLMからの応答が取得できませんでした。")
+                    break
 
-        obs, _, done, infos = env.step(torch.tensor(vlm_vel_commands, device = obs.device))
+        obs, _, done, infos = env.step(torch.tensor(vlm_vel_commands, device=obs.device))
 
         if done or env.is_stop_called or num_steps > max_episode_steps:
             break
@@ -385,7 +665,7 @@ def main():
             same_pos_count = 0
         prev_pos = cur_pos
 
-        # Break out of the loop if the robot has stayed in the same location for 500 steps
+        # Break out of the loop if the robot has stayed in the same location for 1000 steps
         if same_pos_count >= 1000:
             print("Robot has stayed in the same location for 1000 steps. Breaking out of the loop.")
             break
@@ -393,21 +673,25 @@ def main():
         if num_steps % steps_per_image == 0:
             curr_frame = infos["observations"]["camera_obs"][0, :, :, :3].cpu().numpy()
             image_observations.append(Image.fromarray(curr_frame))
+            # Keep only recent images
+            MAX_IMAGE_HISTORY = 64
+            if len(image_observations) > MAX_IMAGE_HISTORY:
+                image_observations = image_observations[-MAX_IMAGE_HISTORY:]
             curr_frame_copy = curr_frame.copy()
             add_instruction_on_img(curr_frame_copy, instruction.instruction_text)
             
         if num_steps % steps_per_viz_image == 0:
             curr_vis_frame = infos["observations"]["viz_camera_obs"][0, :, :, :3].cpu().numpy()
-            add_instruction_on_img(curr_vis_frame, stream_output)
+            add_instruction_on_img(curr_vis_frame, vlm_response_cache if vlm_response_cache else "")
             rgb_obses.append(np.concatenate([curr_frame_copy, curr_vis_frame], axis=1))
 
         num_steps += 1
         if env_steps_to_go == 0:
             env.set_stop_called(True)
 
-        # if args_cli.visualize_path:
-        #     visualizer.visualize(reference_path_isaac)
-    measurements = infos["measurements"]
+    if instruction_provider:
+        instruction_provider.shutdown()
+    measurements = infos.get("measurements", {})
 
     result_dir = f"eval_results/{args_cli.task}_loco_{args_cli.load_run}"
     if not os.path.exists(result_dir):

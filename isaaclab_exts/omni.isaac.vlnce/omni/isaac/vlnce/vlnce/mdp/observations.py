@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import os
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -28,6 +29,24 @@ from isaaclab.assets import Articulation, RigidObject
 from .actions import NavigationAction, VLMActions, VLMActionsGPT
 import matplotlib.pyplot as plt
 import cv2
+from contextlib import suppress
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - optional dependency
+    Image = None
+
+NAVILA_DUMP_HEIGHT = os.getenv("NAVILA_DUMP_HEIGHT", "0") == "1"
+NAVILA_DUMP_HEIGHT_DIR = os.getenv("NAVILA_DUMP_HEIGHT_DIR", "./logs/height_maps")
+NAVILA_SHOW_HEIGHT = os.getenv("NAVILA_SHOW_HEIGHT", "0") == "1"
+_height_map_dump_idx = 0
+_warned_height_map_dump = False
+_height_map_window_name = "NaVILA Height Map"
+if NAVILA_DUMP_HEIGHT or NAVILA_SHOW_HEIGHT:
+    print(
+        "[height_map_lidar] Height-map debug enabled. "
+        f"DUMP={NAVILA_DUMP_HEIGHT} (dir={NAVILA_DUMP_HEIGHT_DIR}), SHOW={NAVILA_SHOW_HEIGHT}"
+    )
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -360,6 +379,58 @@ def height_map_lidar(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg, offset: f
     #     map_2_5D = map_2_5D.unsqueeze(0)
     # import pdb; pdb.set_trace()
     map_2_5D = map_2_5D.view(num_envs, len(x_bins), len(y_bins))
+
+    if (NAVILA_DUMP_HEIGHT or NAVILA_SHOW_HEIGHT) and map_2_5D.numel() > 0:
+        global _height_map_dump_idx, _warned_height_map_dump
+        try:
+            hm_tensor = map_2_5D[0].detach().cpu()
+            hm_np = hm_tensor.numpy()
+        except Exception:
+            hm_np = None
+
+        if hm_np is not None:
+            mask = np.isfinite(hm_np)
+            if mask.any():
+                min_val = float(hm_np[mask].min())
+                max_val = float(hm_np[mask].max())
+                if max_val > min_val:
+                    hm_norm = (hm_np - min_val) / (max_val - min_val)
+                else:
+                    hm_norm = np.zeros_like(hm_np)
+            else:
+                hm_norm = np.zeros_like(hm_np)
+            hm_norm = np.clip(hm_norm, 0.0, 1.0)
+            hm_img = (hm_norm * 255.0).astype(np.uint8)
+
+            if NAVILA_DUMP_HEIGHT:
+                if Image is None:
+                    if not _warned_height_map_dump:
+                        print("[height_map_lidar] NAVILA_DUMP_HEIGHT=1 but Pillow is not installed; skipping dumps.")
+                        _warned_height_map_dump = True
+                else:
+                    try:
+                        os.makedirs(NAVILA_DUMP_HEIGHT_DIR, exist_ok=True)
+                        dump_path = os.path.join(
+                            NAVILA_DUMP_HEIGHT_DIR,
+                            f"height_map_{_height_map_dump_idx:06d}.png",
+                        )
+                        with suppress(Exception):
+                            Image.fromarray(hm_img).save(dump_path)
+                            print(f"[height_map_lidar] Saved height map to {dump_path}")
+                        if NAVILA_DUMP_HEIGHT and not os.path.exists(dump_path):
+                            print(f"[height_map_lidar] WARNING: expected dump {dump_path} not found after save attempt")
+                        _height_map_dump_idx += 1
+                    except OSError as exc:
+                        if not _warned_height_map_dump:
+                            print(f"[height_map_lidar] Failed to create dump directory '{NAVILA_DUMP_HEIGHT_DIR}': {exc}")
+                            _warned_height_map_dump = True
+
+            if NAVILA_SHOW_HEIGHT:
+                color_img = cv2.applyColorMap(hm_img, cv2.COLORMAP_VIRIDIS)
+                cv2.namedWindow(_height_map_window_name, cv2.WINDOW_NORMAL)
+                cv2.imshow(_height_map_window_name, color_img)
+                cv2.waitKey(1)
+
     max_across_frames = F.max_pool2d(map_2_5D, kernel_size=3, stride=1, padding=1).view(num_envs, -1)
 
     
@@ -382,4 +453,3 @@ def height_map_lidar(env: ManagerBasedEnv, sensor_cfg: SceneEntityCfg, offset: f
     # print("output: ", output)
 
     return max_across_frames
-

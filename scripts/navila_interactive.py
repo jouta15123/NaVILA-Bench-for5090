@@ -785,7 +785,6 @@ def main():
                 vlm_response_cache, plan, commands, fallback_used = result
                 command_queue.extend(plan)
                 stop_plan_active = all(cmd.kind == "stop" for cmd in commands)
-                last_plan_had_stop = any(cmd.kind == "stop" for cmd in commands)
                 if command_queue:
                     current_command, command_steps_remaining = command_queue.pop(0)
                 plan_counter += 1
