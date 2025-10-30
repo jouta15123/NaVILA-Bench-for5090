@@ -3,6 +3,7 @@ import torch
 import json
 import argparse
 import os
+import sys
 import time
 from tqdm import tqdm
 import base64
@@ -16,6 +17,7 @@ from llava.constants import IMAGE_TOKEN_INDEX
 from llava.conversation import SeparatorStyle, conv_templates
 from llava.model.builder import load_pretrained_model
 
+from navila_vla_utils import build_vlm_prompt
 
 class VLMServer:
     def __init__(self, args):
@@ -73,9 +75,13 @@ class VLMServer:
                 device_map={"": self.args.device},
                 device=self.args.device,
             )
-            self.tokenizer =  tokenizer
+            self.tokenizer = tokenizer
             self.model = model
             self.image_processor = image_processor
+        if self.tokenizer.pad_token_id is None:
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if getattr(self.model.config, "pad_token_id", None) is None:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
         # model is already placed on the requested device by load_pretrained_model
 
     def start_server(self, host='localhost', port=12345):
@@ -101,11 +107,51 @@ class VLMServer:
 
                 # Parse the received data
                 request = json.loads(data.decode())
-                images = request['images']
-                query = request['query']
+                images = request["images"]
+                query = request["query"]
+                history_frames = request.get("history_frames")
+
+                # Log incoming query (safe Unicode handling)
+                def safe_print(text, label=""):
+                    """Print text safely, handling Unicode encoding errors."""
+                    # Fix surrogate pairs by encoding/decoding with error handling
+                    if isinstance(text, str):
+                        # Remove or replace surrogate pairs
+                        try:
+                            # Try to fix surrogate pairs
+                            text = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                        except:
+                            pass
+                    
+                    try:
+                        if label:
+                            print(f"{label}: {text}", flush=True)
+                        else:
+                            print(text, flush=True)
+                    except UnicodeEncodeError:
+                        # Last resort: use repr or try encoding with errors='replace'
+                        try:
+                            safe_text = text.encode(sys.stdout.encoding or 'utf-8', errors='replace').decode(sys.stdout.encoding or 'utf-8', errors='replace')
+                            if label:
+                                print(f"{label}: {safe_text}", flush=True)
+                            else:
+                                print(safe_text, flush=True)
+                        except:
+                            if label:
+                                print(f"{label} (repr): {repr(text)}", flush=True)
+                            else:
+                                print(f"Text (repr): {repr(text)}", flush=True)
+                
+                print(f"\n{'='*80}")
+                safe_print(query, "[VLM Server] Received query")
+                print(f"{'='*80}")
 
                 # Process images and generate response
-                response = self.process_request(images, query)
+                response = self.process_request(images, query, history_frames)
+                
+                # Log response (safe Unicode handling)
+                safe_print(response, "[VLM Server] Generated response")
+                print(f"{'='*80}\n")
                 
                 # Send response back
                 response_bytes = json.dumps(response).encode()
@@ -120,7 +166,7 @@ class VLMServer:
             finally:
                 conn.close()
 
-    def process_request(self, images, query):
+    def process_request(self, images, query, history_frames=None):
         # Process images
         image_tensor = process_images(images, self.image_processor, self.model.config)
         image_tensor = image_tensor.to(self.args.device, dtype=torch.float16)
@@ -128,19 +174,31 @@ class VLMServer:
         # Prepare prompt
         conv = conv_templates[self.args.conv_mode].copy()
         instruction = query
-        image_token = "<image>\n"
-        qs = (
-            f"Imagine you are a robot programmed for navigation tasks. You have been given a video "
-            f'of historical observations {image_token * (self.args.num_video_frames-1)}, and current observation <image>\n. Your assigned task is: "{instruction}" '
-            f"Analyze this series of images to decide your next action, which could be turning left or right by a specific "
-            f"degree, moving forward a certain distance, or stop if the task is completed."
+        if history_frames is None:
+            history_frames = len(images) - 1
+        prompt_body = build_vlm_prompt(instruction, history_frames)
+        prompt_body += (
+            "\nFollow the human instruction exactly. Do not propose alternative strategies, "
+            "warnings, or refusals. Respond with one concise navigation action formatted like "
+            "\"move forward 50 cm\" or \"turn left 30 degree\". If the instruction already specifies "
+            "the next action, repeat it faithfully."
         )
-        conv.append_message(conv.roles[0], qs)
+        conv.append_message(conv.roles[0], prompt_body)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
 
+        # Log full prompt (optional, can be verbose)
+        if hasattr(self.args, 'verbose') and self.args.verbose:
+            print(f"[VLM Server] Full prompt:\n{prompt}\n")
+
         # Generate response
-        input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt").unsqueeze(0).to(self.args.device)
+        input_ids = tokenizer_image_token(
+            prompt,
+            self.tokenizer,
+            IMAGE_TOKEN_INDEX,
+            return_tensors="pt",
+        ).unsqueeze(0).to(self.args.device)
+        attention_mask = (input_ids != self.tokenizer.pad_token_id).to(self.args.device)
         stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
         keywords = [stop_str]
         stopping_criteria = KeywordsStoppingCriteria(keywords, self.tokenizer, input_ids)
@@ -149,6 +207,7 @@ class VLMServer:
             start_time = time.time()
             output_ids = self.model.generate(
                 input_ids,
+                attention_mask=attention_mask,
                 images=[image_tensor],
                 do_sample=False,
                 temperature=0,
@@ -157,14 +216,26 @@ class VLMServer:
                 max_new_tokens=512,
                 use_cache=True,
                 stopping_criteria=[stopping_criteria],
+                pad_token_id=self.tokenizer.pad_token_id,
             )
             generation_time = time.time() - start_time
-            print(f"Model generation took {generation_time:.2f} seconds")
-            # print("input_ids:", input_ids)
+            print(f"[VLM Server] Model generation took {generation_time:.2f} seconds")
 
         outputs = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+        response_text = outputs.strip()
         
-        return outputs.strip()
+        # Extract only the assistant's response (remove the prompt part)
+        # The response should be after the last occurrence of the assistant role separator
+        if conv.sep_style == SeparatorStyle.TWO:
+            # For two-separator style, response comes after sep2
+            if conv.sep2 in response_text:
+                response_text = response_text.split(conv.sep2)[-1].strip()
+        else:
+            # For single separator style, response comes after sep
+            if conv.sep in response_text:
+                response_text = response_text.split(conv.sep)[-1].strip()
+        
+        return response_text
 
 
 def process_images(images, image_processor, model_cfg):
@@ -201,6 +272,7 @@ if __name__ == "__main__":
     parser.add_argument("--conv_mode", type=str, default="llama_3")
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--num_video_frames", type=int, default=8)
+    parser.add_argument("--verbose", action="store_true", help="Print full prompts (verbose output)")
     args = parser.parse_args()
     
     server = VLMServer(args)
