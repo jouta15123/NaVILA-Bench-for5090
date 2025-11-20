@@ -1,6 +1,3 @@
-[submodule "MotionCLIP"]
-	path = MotionCLIP
-	url = https://github.com/GuyTevet/MotionCLIP.git
 [submodule "NaVILA"]
 	path = NaVILA
 	url = https://github.com/AnjieCheng/NaVILA.git
