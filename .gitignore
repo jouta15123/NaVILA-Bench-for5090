@@ -19,3 +19,9 @@ original_scripts/
 eval_results/
 # Local environment or secrets
 .env
+hoyo_v1_1/data/
+hoyo_v1_1/joint_training_results/
+
+NAVILA/
+
+

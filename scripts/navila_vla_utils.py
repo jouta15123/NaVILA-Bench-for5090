@@ -13,6 +13,7 @@ areas:
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import os
 import re
@@ -62,36 +63,33 @@ class ActionCommand:
 
 def sample_and_pad_images(
     frames: Sequence[Image.Image],
-    num_frames: int,
+    num_frames: int = 8,
     frame_size: Tuple[int, int] | None = None,
 ) -> List[Image.Image]:
     """
     Mirror Habitat's sampling: keep evenly spaced history plus the latest frame.
+    
+    This matches the original implementation in NaVILA/evaluation/vlnce_baselines/navila_trainer.py
 
     Args:
         frames: Ordered list of PIL images (oldest -> newest).
-        num_frames: Desired number of frames for the VLM.
-        frame_size: Optional (width, height) for black padding frames.
+        num_frames: Desired number of frames for the VLM (default: 8).
+        frame_size: Optional (width, height) for black padding frames (default: 512x512).
     """
-    if not frames:
-        if frame_size is None:
-            frame_size = (512, 512)
-        return [Image.new("RGB", frame_size, color=(0, 0, 0)) for _ in range(num_frames)]
-
-    padded = list(frames)
+    frames = copy.deepcopy(list(frames))
+    
     if frame_size is None:
-        frame_size = padded[-1].size
+        frame_size = (512, 512)
 
-    while len(padded) < num_frames:
-        padded.insert(0, Image.new("RGB", frame_size, color=(0, 0, 0)))
+    if len(frames) < num_frames:
+        while len(frames) < num_frames:
+            frames.insert(0, Image.new("RGB", frame_size, color=(0, 0, 0)))
 
-    latest = padded[-1]
-    if len(padded) == num_frames:
-        sampled = padded
-    else:
-        indices = np.linspace(0, len(padded) - 1, num=num_frames - 1, endpoint=False, dtype=int)
-        sampled = [padded[i] for i in indices] + [latest]
-    return sampled
+    latest_frame = frames[-1]
+    sampled_indices = np.linspace(0, len(frames) - 1, num=num_frames - 1, endpoint=False, dtype=int)
+    sampled_frames = [frames[i] for i in sampled_indices] + [latest_frame]
+
+    return sampled_frames
 
 
 def encode_images_to_base64(frames: Sequence[Image.Image]) -> List[str]:
@@ -109,19 +107,30 @@ def encode_images_to_base64(frames: Sequence[Image.Image]) -> List[str]:
 def build_vlm_prompt(instruction: str, num_history_frames: int) -> str:
     """
     Reproduce the official prompt template used in the Habitat evaluation.
+    
+    This matches the original implementation in NaVILA/evaluation/vlnce_baselines/navila_trainer.py
     """
-    interleaved = "<image>\n" * num_history_frames
+    interleaved_images = "<image>\n" * (num_history_frames - 1)
     return (
-        "Imagine you are a robot programmed for navigation tasks. "
-        f"You have been given a video of historical observations {interleaved}"
-        "and current observation <image>\n. "
-        f'Your assigned task is: "{instruction}" '
-        "Analyze this series of images to decide your next action, which could be "
-        "turning left or right by a specific degree, moving forward a certain distance, "
-        "or stop if the task is completed."
+        f"Imagine you are a robot programmed for navigation tasks. You have been given a video "
+        f"of historical observations {interleaved_images}, and current observation <image>\n. Your assigned task is: \"{instruction}\" "
+        f"Analyze this series of images to decide your next action, which could be turning left or right by a specific "
+        f"degree, moving forward a certain distance, or stop if the task is completed."
     )
 
 
+# Action type detection patterns (matching original navila_trainer.py)
+_ACTION_STOP_PATTERN = re.compile(r"\bstop\b", re.IGNORECASE)
+_ACTION_MOVE_FORWARD_PATTERN = re.compile(r"\bis move forward\b", re.IGNORECASE)
+_ACTION_TURN_LEFT_PATTERN = re.compile(r"\bis turn left\b", re.IGNORECASE)
+_ACTION_TURN_RIGHT_PATTERN = re.compile(r"\bis turn right\b", re.IGNORECASE)
+
+# Distance/angle extraction patterns (matching original navila_trainer.py)
+_MOVE_FORWARD_DISTANCE_PATTERN = re.compile(r"move forward (\d+) cm", re.IGNORECASE)
+_TURN_LEFT_DEGREE_PATTERN = re.compile(r"turn left (\d+) degree", re.IGNORECASE)
+_TURN_RIGHT_DEGREE_PATTERN = re.compile(r"turn right (\d+) degree", re.IGNORECASE)
+
+# Legacy patterns for backward compatibility
 _MOVE_PATTERN = re.compile(
     r"(?:move|go|walk|proceed)\s+forward\s+(?:around\s+)?(\d+(?:\.\d+)?)\s*cm",
     re.IGNORECASE,
@@ -173,49 +182,78 @@ def _convert_angular_unit(value: float | None, unit: str | None) -> float | None
 def parse_vlm_response(text: str) -> List[ActionCommand]:
     """
     Parse the VLM text into ordered ActionCommand objects.
-
-    The parser searches for explicit action spans in the order they appear.
+    
+    This matches the original implementation in NaVILA/evaluation/vlnce_baselines/navila_trainer.py:
+    1. First detect action type using "is move forward", "is turn left", "is turn right", or "stop"
+    2. Then extract distance/angle using "move forward X cm", "turn left X degree", "turn right X degree"
+    3. Quantize to nearest supported values (25/50/75 cm, 15/30/45 deg)
     """
+    # Step 1: Detect action type (matching original patterns)
+    patterns = {
+        0: _ACTION_STOP_PATTERN,
+        1: _ACTION_MOVE_FORWARD_PATTERN,
+        2: _ACTION_TURN_LEFT_PATTERN,
+        3: _ACTION_TURN_RIGHT_PATTERN,
+    }
+    
+    def map_string_to_action(s):
+        """Map string to action integer (0=stop, 1=move_forward, 2=turn_left, 3=turn_right)."""
+        for action, pattern in patterns.items():
+            if pattern.search(s):
+                return action
+        return None
+    
+    action_type = map_string_to_action(text)
+    
+    # Default to move_forward if no action detected (matching original behavior)
+    if action_type is None:
+        action_type = 1
+    
     commands: List[ActionCommand] = []
-    cursor = 0
-    lower_text = text.lower()
-
-    while cursor < len(text):
-        match_spans = []
-        for kind, pattern in (
-            ("move", _MOVE_PATTERN),
-            ("turn_left", _TURN_LEFT_PATTERN),
-            ("turn_right", _TURN_RIGHT_PATTERN),
-        ):
-            match = pattern.search(text, cursor)
-            if match:
-                match_spans.append((match.start(), match.end(), kind, match))
-        stop_match = _STOP_PATTERN.search(text, cursor)
-        if stop_match:
-            match_spans.append((stop_match.start(), stop_match.end(), "stop", stop_match))
-
-        if not match_spans:
-            break
-
-        start, end, kind, match_obj = min(match_spans, key=lambda item: item[0])
-        cursor = end
-
-        if kind == "move":
-            magnitude = float(match_obj.group(1))
-            commands.append(ActionCommand(kind="move", magnitude=magnitude, unit="cm"))
-        elif kind == "turn_left":
-            magnitude = float(match_obj.group(1))
-            commands.append(ActionCommand(kind="turn_left", magnitude=magnitude, unit="deg"))
-        elif kind == "turn_right":
-            magnitude = float(match_obj.group(1))
-            commands.append(ActionCommand(kind="turn_right", magnitude=magnitude, unit="deg"))
-        else:
-            commands.append(ActionCommand(kind="stop"))
-
-    # If nothing matched but we saw a stop token anywhere, issue stop.
-    if not commands and _STOP_PATTERN.search(lower_text):
+    
+    # Step 2: Extract distance/angle and create command
+    if action_type == 1:  # move forward
+        try:
+            match = re.search(_MOVE_FORWARD_DISTANCE_PATTERN, text)
+            distance = int(match.group(1)) if match else 25
+        except:
+            distance = 25
+        
+        # Quantize to nearest 25, 50, or 75
+        if (distance % 25) != 0:
+            distance = min([25, 50, 75], key=lambda x: abs(x - distance))
+        
+        commands.append(ActionCommand(kind="move", magnitude=float(distance), unit="cm"))
+    
+    elif action_type == 2:  # turn left
+        try:
+            match = re.search(_TURN_LEFT_DEGREE_PATTERN, text)
+            degree = int(match.group(1)) if match else 15
+        except:
+            degree = 15
+        
+        # Quantize to nearest 15, 30, or 45
+        if (degree % 15) != 0:
+            degree = min([15, 30, 45], key=lambda x: abs(x - degree))
+        
+        commands.append(ActionCommand(kind="turn_left", magnitude=float(degree), unit="deg"))
+    
+    elif action_type == 3:  # turn right
+        try:
+            match = re.search(_TURN_RIGHT_DEGREE_PATTERN, text)
+            degree = int(match.group(1)) if match else 15
+        except:
+            degree = 15
+        
+        # Quantize to nearest 15, 30, or 45
+        if (degree % 15) != 0:
+            degree = min([15, 30, 45], key=lambda x: abs(x - degree))
+        
+        commands.append(ActionCommand(kind="turn_right", magnitude=float(degree), unit="deg"))
+    
+    else:  # action_type == 0, stop
         commands.append(ActionCommand(kind="stop"))
-
+    
     return commands
 
 
