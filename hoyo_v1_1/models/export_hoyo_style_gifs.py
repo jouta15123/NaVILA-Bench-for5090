@@ -46,6 +46,42 @@ COARSE_SLUGS = {
     "ふらふら系": "wobbly",
 }
 
+# --- 視認性向上のためのスタイル定義 ---
+STYLE_CONFIG = {
+    "line_color": "#333333",      # ボーンの色（濃いグレー）
+    "line_width": 2.5,            # ボーンの太さ
+    "marker_face_color": "#d62728", # 関節の色（赤）
+    "marker_edge_color": "white", # 関節の縁取り色
+    "marker_size": 5,             # 関節の大きさ
+    "head_face_color": "#ffcc99", # 頭の色（肌色）
+    "head_edge_color": "#333333", # 頭の縁取り色
+}
+
+# ★ここをHOYOデータセットの定義に合わせて修正したで！
+# HOYO定義: [頭(0), 首(1), 右肩(2), 右肘(3), 右手(4), 左肩(5), 左肘(6), 左手(7), 右腰(8), 右膝(9), 右足(10), 左腰(11), 左膝(12), 左足(13)]
+SKELETON_EDGES = [
+    # 上半身
+    [0, 1],   # 頭 -> 首
+    [1, 2],   # 首 -> 右肩
+    [2, 3],   # 右肩 -> 右肘
+    [3, 4],   # 右肘 -> 右手
+    [1, 5],   # 首 -> 左肩
+    [5, 6],   # 左肩 -> 左肘
+    [6, 7],   # 左肘 -> 左手
+    
+    # 胴体（首から腰へ）
+    [1, 8],   # 首 -> 右腰
+    [1, 11],  # 首 -> 左腰
+    [8, 11],  # 右腰 -> 左腰（骨盤を閉じる）
+
+    # 下半身
+    [8, 9],   # 右腰 -> 右膝
+    [9, 10],  # 右膝 -> 右足
+    [11, 12], # 左腰 -> 左膝
+    [12, 13], # 左膝 -> 左足
+]
+# ------------------------------------
+
 
 def _select_samples_for_group(
     dataset: HoyoInstructionDataset,
@@ -70,9 +106,54 @@ def _select_samples_for_group(
     return rng.sample(all_samples, n_samples)
 
 
+def _render_skeleton(ax, xs, ys, head_radius):
+    """
+    HOYO仕様に合わせてスケルトンを描画する
+    """
+    
+    # 1. ボーン（線）を描画
+    max_idx = len(xs) - 1
+    for u, v in SKELETON_EDGES:
+        if u <= max_idx and v <= max_idx:
+            ax.plot(
+                [xs[u], xs[v]], 
+                [ys[u], ys[v]], 
+                color=STYLE_CONFIG["line_color"],
+                linewidth=STYLE_CONFIG["line_width"],
+                zorder=1
+            )
+
+    # 2. 関節（点）を描画
+    ax.plot(
+        xs,
+        ys,
+        "o",
+        markerfacecolor=STYLE_CONFIG["marker_face_color"],
+        markeredgecolor=STYLE_CONFIG["marker_edge_color"],
+        markersize=STYLE_CONFIG["marker_size"],
+        markeredgewidth=1.0,
+        zorder=2
+    )
+
+    # 3. 頭を描画
+    # HOYOでは index=0 が「頭」と決まっているので、座標探索せずに0番を使う
+    head_x = xs[0]
+    head_y = ys[0]
+    
+    head = Circle(
+        (head_x, head_y),
+        radius=head_radius,
+        edgecolor=STYLE_CONFIG["head_edge_color"],
+        facecolor=STYLE_CONFIG["head_face_color"],
+        linewidth=1.5,
+        zorder=3,
+    )
+    ax.add_patch(head)
+
+
 def _render_group_gif(
     coarse_label: str,
-    samples: list[tuple[np.ndarray, str]],
+    samples: list[np.ndarray],
     out_path: Path,
     fps: int = 10,
 ) -> None:
@@ -87,16 +168,11 @@ def _render_group_gif(
         print(f"[WARN] No samples for coarse label {coarse_label}, skip.")
         return
 
-    # 分解
-    arrays = [arr for (arr, _) in samples]
-    labels = [lab for (_, lab) in samples]
-
-    # Assume all samples share same T
-    T = arrays[0].shape[0]
-    n = len(arrays)
+    T = samples[0].shape[0]
+    n = len(samples)
 
     # 全サンプル・全フレームで座標範囲を集計
-    stacked = np.concatenate(arrays, axis=0)  # (n*T, 14, 2)
+    stacked = np.concatenate(samples, axis=0)  # (n*T, 14, 2)
     x_min = stacked[..., 0].min()
     x_max = stacked[..., 0].max()
     y_min = stacked[..., 1].min()
@@ -105,10 +181,7 @@ def _render_group_gif(
     width = max(x_max - x_min, 1e-3)
     height = max(y_max - y_min, 1e-3)
 
-    # 顔の円の半径（全体の高さに対する比で決める）
     head_radius = 0.08 * height
-
-    # 横方向オフセット（サンプル同士が重ならないように）
     dx = width * 2.0
 
     frames: list[np.ndarray] = []
@@ -118,43 +191,13 @@ def _render_group_gif(
     for t in range(T):
         ax.clear()
 
-        for i, (arr, fine_lab) in enumerate(samples):
+        for i, arr in enumerate(samples):
             coords = arr[t]  # (14, 2)
-            # HOYO は (x, y) だが，見やすさのためプロット上では縦軸を第1成分に，
-            # 横軸を第2成分に割り当てる（x, y を入れ替える）
+            # HOYOデータは [y, x] なので、plot用に xs=col1, ys=col0 にする
             xs = coords[:, 1] + i * dx
             ys = coords[:, 0]
-
-            # 点と簡単な線でスティックっぽく描画（単純にインデックス順で結ぶ）
-            ax.plot(xs, ys, "o-", markersize=3, linewidth=1.0, alpha=0.9)
-
-            # プロット座標系（xs, ys）で一番上に来る点を「頭」とみなして円を描画
-            # invert_yaxis() を使っているので，画面上の最上点 = 数値的に最小の y
-            head_idx = int(np.argmin(ys))
-            head_x = xs[head_idx]
-            head_y = ys[head_idx]
-            head = Circle(
-                (head_x, head_y),
-                radius=head_radius,
-                edgecolor="white",
-                facecolor="black",
-                linewidth=1.5,
-                zorder=3,
-            )
-            ax.add_patch(head)
-
-            # 各サンプルのキャプション（fine オノマトペ）を足元付近に表示
-            caption_x = xs.mean()
-            caption_y = y_max + 0.4 * height
-            ax.text(
-                caption_x,
-                caption_y,
-                fine_lab,
-                fontsize=8,
-                ha="center",
-                va="bottom",
-                color="white",
-            )
+            
+            _render_skeleton(ax, xs, ys, head_radius)
 
         ax.set_aspect("equal")
         ax.set_xticks([])
@@ -163,15 +206,12 @@ def _render_group_gif(
 
         ax.set_xlim(x_min - width, x_min + dx * (n - 0.5))
         ax.set_ylim(y_min - 0.5 * height, y_max + 0.5 * height)
-        # 画面上では頭が上，足が下になるように上下を反転
         ax.invert_yaxis()
 
         fig.canvas.draw()
         w, h = fig.canvas.get_width_height()
-        # FigureCanvasAgg exposes tostring_argb; convert ARGB -> RGB
         buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
         buf = buf.reshape(h, w, 4)
-        # Roll alpha channel to the end to get RGBA, then drop alpha
         buf = np.roll(buf, -1, axis=2)
         image = buf[..., :3]
         frames.append(image)
@@ -184,7 +224,7 @@ def _render_group_gif(
 
 
 def _render_all_groups_gif(
-    groups: dict[str, list[tuple[np.ndarray, str]]],
+    groups: dict[str, list[np.ndarray]],
     out_path: Path,
     fps: int = 10,
 ) -> None:
@@ -195,17 +235,15 @@ def _render_all_groups_gif(
             " 例: pip install imageio"
         )
 
-    # Flatten して座標レンジとフレーム数を取得
     all_arrays: list[np.ndarray] = []
     for arrs in groups.values():
-        for arr, _ in arrs:
-            all_arrays.append(arr)
+        all_arrays.extend(arrs)
     if not all_arrays:
         print("[WARN] No samples for any group, skip combined GIF.")
         return
 
     T = all_arrays[0].shape[0]
-    stacked = np.concatenate(all_arrays, axis=0)  # (G*n, T, 14, 2) → flatten (ここでは (N*T, 14, 2) 相当)
+    stacked = np.concatenate(all_arrays, axis=0)
     x_min = stacked[..., 0].min()
     x_max = stacked[..., 0].max()
     y_min = stacked[..., 1].min()
@@ -233,48 +271,24 @@ def _render_all_groups_gif(
 
         for row_idx, coarse_label in enumerate(row_labels):
             arrs = groups[coarse_label]
-            for col_idx, (arr, fine_lab) in enumerate(arrs):
+            for col_idx, arr in enumerate(arrs):
                 coords = arr[t]  # (14, 2)
                 xs = coords[:, 1] + col_idx * dx
                 ys = coords[:, 0] + row_idx * dy
 
-                ax.plot(xs, ys, "o-", markersize=3, linewidth=1.0, alpha=0.9)
+                _render_skeleton(ax, xs, ys, head_radius)
 
-                head_idx = int(np.argmin(ys))
-                head_x = xs[head_idx]
-                head_y = ys[head_idx]
-                head = Circle(
-                    (head_x, head_y),
-                    radius=head_radius,
-                    edgecolor="white",
-                    facecolor="black",
-                    linewidth=1.5,
-                    zorder=3,
-                )
-                ax.add_patch(head)
-
-                # 各サンプルのキャプション（fine オノマトペ）を足元付近に表示
-                caption_x = xs.mean()
-                caption_y = y_min - 0.3 * height + row_idx * dy
-                ax.text(
-                    caption_x,
-                    caption_y,
-                    fine_lab,
-                    fontsize=8,
-                    ha="center",
-                    va="bottom",
-                    color="white",
-                )
-
-            # 行の左側にスタイル名を表示
+            row_top_y = row_idx * dy - 0.4 * height
+            row_center_x = x_min + dx * (n_cols - 1) / 2
             ax.text(
-                x_min - 1.2 * width,
-                row_idx * dy,
+                row_center_x,
+                row_top_y,
                 coarse_label,
-                fontsize=10,
-                va="center",
-                ha="right",
-                color="white",
+                fontsize=12,
+                ha="center",
+                va="bottom",
+                color="black",
+                weight="bold",
             )
 
         ax.set_aspect("equal")
@@ -282,7 +296,7 @@ def _render_all_groups_gif(
         ax.set_yticks([])
 
         ax.set_xlim(x_min - width, x_min + dx * (n_cols - 0.5))
-        ax.set_ylim(y_min - 0.5 * height, y_min + dy * (n_rows - 0.5))
+        ax.set_ylim(y_min - 0.8 * height, y_min + dy * (n_rows - 0.5))
         ax.invert_yaxis()
 
         fig.canvas.draw()
@@ -341,7 +355,6 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     hoyo_root = repo_root / "hoyo_v1_1"
 
-    # Load HOYO instruction dataset (11 fine labels, COM 中心化＋リサンプリング済み)
     dataset = HoyoInstructionDataset(
         hoyo_root,
         INSTRUCTION_ONOMATOPEIA,
@@ -350,7 +363,7 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
 
-    groups: dict[str, list[tuple[np.ndarray, str]]] = {}
+    groups: dict[str, list[np.ndarray]] = {}
 
     for coarse_label, slug in COARSE_SLUGS.items():
         selected = _select_samples_for_group(
@@ -363,11 +376,11 @@ def main() -> None:
             print(f"[WARN] No data for {coarse_label}, skipping.")
             continue
 
-        groups[coarse_label] = selected
+        arrays = [arr for (arr, _) in selected]
+        groups[coarse_label] = arrays
         gif_path = out_dir / f"hoyo_{slug}_group.gif"
-        _render_group_gif(coarse_label, selected, gif_path, fps=args.fps)
+        _render_group_gif(coarse_label, arrays, gif_path, fps=args.fps)
 
-    # 4スタイルをまとめた比較用 GIF も出力
     if groups:
         combined_path = out_dir / "hoyo_all_styles.gif"
         _render_all_groups_gif(groups, combined_path, fps=args.fps)
@@ -375,5 +388,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

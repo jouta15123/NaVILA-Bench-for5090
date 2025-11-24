@@ -209,7 +209,7 @@ z_{\mathrm{sem}}^{(\mathrm{coarse})}(g)
 = \frac{1}{|S_g|} \sum_{w \in S_g}
 z_{\mathrm{sem}}^{(\mathrm{fine})}(w)
 \]
-と定義する．なお「通常」は質感が付与されていない基準歩行として扱い，coarse 4 スタイルには含めないこととした．
+と定義する．
 
 \subsection{意味$\to$モーション射影と対照学習}
 
@@ -292,20 +292,6 @@ p_i =
 \]
 であり，実験では $\lambda_{\mathrm{VAE}}=1.0$，
 $\lambda_{\mathrm{contrast}}\in\{0.3, 0.5\}$ を主に用いた．
-初期実装では上記のような SupCon 形式を用いたが，
-後述する coarse 4 スタイル実験では，
-より単純で安定な CLIP 風のクロスエントロピー損失
-\[
-L_{\mathrm{clip}}
-= \frac{1}{B}\sum_i 
-  -\log\frac{
-    \exp \bigl(\exp(\alpha)\, z_{m,i}^\top z_s^{(y_i)}\bigr)
-  }{
-    \sum_k \exp \bigl(\exp(\alpha)\, z_{m,i}^\top z_s^{(k)}\bigr)
-  }
-\]
-を用いることで，
-MotionCLIP latent 上で 4 スタイルをより明瞭に分離できることを確認した．
 
 \subsection{学習スケジュール}
 
@@ -366,58 +352,6 @@ MotionCLIP latent 上で 4 種類の粗いスタイルを
 強化学習におけるスタイル報酬
 $\cos(z_{\mathrm{mot(agent)}}, z_{\mathrm{sem(onm)}})$
 の基盤としては有用な表現が得られていると考えられる．
-
-\paragraph{coarse 4 スタイル latent の詳細解析}
-coarse 4 スタイルに対しては，追加解析スクリプトにより
-混同行列，PCA/t-SNE 可視化，および
-コサイン類似度の統計を評価した
-（図\ref{fig:coarse_confusion},
-図\ref{fig:coarse_pca_tsne},
-図\ref{fig:coarse_cosine}）．
-図\ref{fig:coarse_confusion} の混同行列では，
-4 クラスの Top-1 精度はおおよそ 0.5 前後であり，
-特に「速い系」と「遅い系」は互いに近いものの，
-「重い系」と「ふらふら系」は他スタイルから明確に区別されている．
-PCA および t-SNE による 2 次元可視化
-（図\ref{fig:coarse_pca_tsne}）では，
-4 つのスタイルがそれぞれまとまったクラスタを形成しており，
-対応するセマンティックプロトタイプがクラスタ中心付近に
-位置していることが確認できる．
-さらにコサイン類似度の箱ひげ図
-（図\ref{fig:coarse_cosine}）からは，
-どのスタイルにおいても
-「正解プロトタイプとの類似度」が
-他スタイルに対する類似度より有意に高く，
-スタイル報酬として
-$\cos(z_{\mathrm{mot(agent)}}, z_{\mathrm{sem(onm)}})$
-を用いたときに十分なマージンが得られることが分かった．
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.6\linewidth]{fig/confusion_matrix_coarse.png}
-  \caption{coarse 4 スタイル（速い／遅い／重い／ふらふら）に対する
-  MotionCLIP latent 空間上の混同行列．}
-  \label{fig:coarse_confusion}
-\end{figure}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.45\linewidth]{fig/pca_coarse.png}
-  \includegraphics[width=0.45\linewidth]{fig/tsne_coarse.png}
-  \caption{coarse 4 スタイル latent の PCA（左）および t-SNE（右）可視化．
-  各色が 1 スタイルを表し，黒い星印は対応するセマンティックプロトタイプを示す．}
-  \label{fig:coarse_pca_tsne}
-\end{figure}
-
-\begin{figure}[t]
-  \centering
-  \includegraphics[width=0.7\linewidth]{fig/cosine_similarity_boxplot.png}
-  \caption{各スタイルごとの
-  「正解プロトタイプ（Target）」と
-  「他スタイルプロトタイプ（Others）」に対する
-  コサイン類似度分布．}
-  \label{fig:coarse_cosine}
-\end{figure}
 
 \section{Navila との統合に向けた具体的設計}
 
@@ -690,20 +624,11 @@ CLIP テキスト／画像エンコーダの latent 空間との alignment を
 ロバストな質感ナビゲーションが可能かどうかを検証したい．
 \begin{thebibliography}{99}
   {\footnotesize
-  \bibitem{spatialrgpt}
-  A.~Cheng et al., ``SpatialRGPT: Grounded Spatial Reasoning in Vision--Language Models,'' arXiv:2406.01584, 2024.\@
-
-  \bibitem{hirobot}
-  L.~X.~Shi et al., ``Hi Robot: Open-Ended Instruction Following with Hierarchical Vision--Language--Action Models,'' arXiv:2502.19417, 2025.\@
-
   \bibitem{navila}
   A.Cheng et al., ``NaVILA: Legged Robot Vision--Language--Action Model for Navigation,'' arXiv:2412.04453, 2025.\@
 
   \bibitem{motionclip}
   G.~Tevet et al., ``MotionCLIP: Exposing Human Motion Generation to CLIP Space,'' ECCV, 2022.\@
-
-  \bibitem{remembr}
-  A.~Anwar et al., ``ReMEmbR: Building and Reasoning Over Long-Horizon Spatio-Temporal Memory for Robot Navigation,'' arXiv:2409.13682, 2024.
   }
 \end{thebibliography}
 
