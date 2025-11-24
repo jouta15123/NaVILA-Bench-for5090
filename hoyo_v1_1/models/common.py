@@ -101,6 +101,37 @@ def encode_semantics_sarashina(labels: List[str], device: torch.device) -> torch
     return emb  # (B, D_sem)
 
 
+def encode_semantics_siglip(
+    labels: List[str],
+    device: torch.device,
+    model_id: str = "google/siglip-base-patch16-256-multilingual",
+) -> torch.Tensor:
+    """
+    SigLIP テキストエンコーダを用いて，日本語オノマトペ文の意味埋め込みを取得する。
+
+    - 入力: オノマトペラベルのリスト（例: ["すたすた", "のろのろ", ...]）
+    - 出力: L2 正規化済みの埋め込みテンソル (B, D_sem)
+    """
+    from transformers import AutoTokenizer, SiglipTextModel
+
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    text_model = SiglipTextModel.from_pretrained(model_id).to(device)
+
+    texts = [f"{w}と歩いている。" if w != "通常" else "普通に歩いている。" for w in labels]
+    print("Semantic texts (SigLIP):")
+    for t in texts:
+        print(" ", t)
+
+    encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
+    with torch.no_grad():
+        out = text_model(**encoded)
+
+    # CLS トークンの埋め込みを使用
+    emb = out.last_hidden_state[:, 0, :]
+    emb = F.normalize(emb, dim=-1)
+    return emb
+
+
 def _compute_stats(dataset: HoyoInstructionDataset, labels: List[str]) -> Tuple[np.ndarray, np.ndarray]:
     all_samples = []
     for lab in labels:
@@ -121,7 +152,18 @@ def _apply_stats(dataset: HoyoInstructionDataset, labels: List[str], mean: np.nd
         dataset.samples_by_label[lab] = new_samples
 
 
-def normalize_dataset(dataset: HoyoInstructionDataset, labels: List[str], stats_path: Path) -> None:
+def normalize_dataset(dataset: HoyoInstructionDataset, labels: List[str], stats_path: Path):
+    """
+    Compute normalization stats on the given dataset, apply them in-place,
+    and save the stats to disk.
+
+    Returns
+    -------
+    data_mean : np.ndarray
+        Per-dimension mean used for normalization.
+    data_std : np.ndarray
+        Per-dimension std used for normalization.
+    """
     data_mean, data_std = _compute_stats(dataset, labels)
     print(f"Data Mean: {data_mean}, Std: {data_std}")
     _apply_stats(dataset, labels, data_mean, data_std)
@@ -130,3 +172,24 @@ def normalize_dataset(dataset: HoyoInstructionDataset, labels: List[str], stats_
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     with open(stats_path, "w") as f:
         json.dump(stats, f)
+
+    return data_mean, data_std
+
+
+def apply_normalization_from_stats(dataset: HoyoInstructionDataset, labels: List[str], stats_path: Path) -> None:
+    """
+    Apply previously computed normalization stats (mean/std) to a dataset.
+
+    This is mainly used to normalize the test split with the same statistics
+    as the train split.
+    """
+    if not stats_path.exists():
+        raise FileNotFoundError(f"Normalization stats not found: {stats_path}")
+
+    with open(stats_path, "r") as f:
+        stats = json.load(f)
+
+    mean = np.asarray(stats["mean"], dtype=np.float32)
+    std = np.asarray(stats["std"], dtype=np.float32)
+
+    _apply_stats(dataset, labels, mean, std)

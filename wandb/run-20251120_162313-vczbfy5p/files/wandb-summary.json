@@ -1,0 +1,1 @@
+{"train/step":3000,"_timestamp":1.7636234233785894e+09,"_step":3000,"train/contrastive_loss":1.3223001956939697,"train/acc":0.09375,"_runtime":29.658859828,"train/vae_loss":1.1496185064315796,"_wandb":{"runtime":29},"train/total_loss":1.2818485498428345}

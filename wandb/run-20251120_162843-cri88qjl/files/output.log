@@ -1,0 +1,33 @@
+Start Joint Training for 3000 steps... (stage=encoder)
+[Step 0001] Total: 2.8677 | VAE: 1.1267 | Cont: 2.8677 | Acc: 0.125
+[Step 0100] Total: 1.5653 | VAE: 1.1789 | Cont: 1.5653 | Acc: 0.094
+[Step 0200] Total: 1.5806 | VAE: 1.1410 | Cont: 1.5806 | Acc: 0.125
+[Step 0300] Total: 1.7100 | VAE: 1.2007 | Cont: 1.7100 | Acc: 0.125
+[Step 0400] Total: 1.3532 | VAE: 1.1714 | Cont: 1.3532 | Acc: 0.062
+[Step 0500] Total: 1.4908 | VAE: 1.1799 | Cont: 1.4908 | Acc: 0.094
+[Step 0600] Total: 1.3892 | VAE: 1.2263 | Cont: 1.3892 | Acc: 0.062
+[Step 0700] Total: 1.4825 | VAE: 1.2175 | Cont: 1.4825 | Acc: 0.125
+[Step 0800] Total: 1.2560 | VAE: 1.2119 | Cont: 1.2560 | Acc: 0.125
+[Step 0900] Total: 1.4630 | VAE: 1.2091 | Cont: 1.4630 | Acc: 0.062
+[Step 1000] Total: 1.2404 | VAE: 1.2093 | Cont: 1.2404 | Acc: 0.062
+[Step 1100] Total: 1.2320 | VAE: 1.2205 | Cont: 1.2320 | Acc: 0.062
+[Step 1200] Total: 1.4171 | VAE: 1.1673 | Cont: 1.4171 | Acc: 0.188
+[Step 1300] Total: 1.2892 | VAE: 1.2010 | Cont: 1.2892 | Acc: 0.062
+[Step 1400] Total: 1.2928 | VAE: 1.2050 | Cont: 1.2928 | Acc: 0.188
+[Step 1500] Total: 1.2922 | VAE: 1.2224 | Cont: 1.2922 | Acc: 0.062
+[Step 1600] Total: 1.4280 | VAE: 1.1837 | Cont: 1.4280 | Acc: 0.094
+[Step 1700] Total: 1.3475 | VAE: 1.2051 | Cont: 1.3475 | Acc: 0.188
+[Step 1800] Total: 1.2754 | VAE: 1.1979 | Cont: 1.2754 | Acc: 0.125
+[Step 1900] Total: 1.2728 | VAE: 1.2409 | Cont: 1.2728 | Acc: 0.125
+[Step 2000] Total: 1.1563 | VAE: 1.1653 | Cont: 1.1563 | Acc: 0.094
+[Step 2100] Total: 1.0954 | VAE: 1.1880 | Cont: 1.0954 | Acc: 0.344
+[Step 2200] Total: 1.2292 | VAE: 1.1863 | Cont: 1.2292 | Acc: 0.281
+[Step 2300] Total: 1.0411 | VAE: 1.2034 | Cont: 1.0411 | Acc: 0.281
+[Step 2400] Total: 1.0072 | VAE: 1.1482 | Cont: 1.0072 | Acc: 0.188
+[Step 2500] Total: 0.7776 | VAE: 1.1543 | Cont: 0.7776 | Acc: 0.281
+[Step 2600] Total: 0.9125 | VAE: 1.1445 | Cont: 0.9125 | Acc: 0.406
+[Step 2700] Total: 1.1214 | VAE: 1.1749 | Cont: 1.1214 | Acc: 0.312
+[Step 2800] Total: 1.0605 | VAE: 1.1724 | Cont: 1.0605 | Acc: 0.344
+[Step 2900] Total: 0.8234 | VAE: 1.1892 | Cont: 0.8234 | Acc: 0.344
+[Step 3000] Total: 0.8476 | VAE: 1.1450 | Cont: 0.8476 | Acc: 0.375
+Saving models to /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results
