@@ -1,0 +1,88 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        e:
+            9mj33f7pzxuit2zt0jbk48h2xyx4o1l9:
+                args:
+                    - --stage
+                    - encoder
+                    - --steps
+                    - "3000"
+                    - --wandb
+                codePath: hoyo_v1_1/models/train_motionclip_joint.py
+                codePathLocal: hoyo_v1_1/models/train_motionclip_joint.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "1967317549056"
+                        used: "625295998976"
+                email: jouta15123@gmail.com
+                executable: /home/jouta/venvs/motionclip/bin/python
+                git:
+                    commit: e0c979886c4de2af3accdad08a3d14931b5f6fdf
+                    remote: git@github.com:jouta15123/NaVILA-Bench-for5090.git
+                gpu: NVIDIA GeForce RTX 5090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 21760
+                      memoryTotal: "34190917632"
+                      name: NVIDIA GeForce RTX 5090
+                      uuid: GPU-23b2d92b-cbcd-c594-edf7-6131c8c31f37
+                host: jouta-FRONTIER
+                memory:
+                    total: "66995527680"
+                os: Linux-6.8.0-85-generic-x86_64-with-glibc2.35
+                program: /home/jouta/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py
+                python: CPython 3.11.14
+                root: /home/jouta/NaVILA-Bench
+                startedAt: "2025-11-20T07:25:22.128062Z"
+                writerId: 9mj33f7pzxuit2zt0jbk48h2xyx4o1l9
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "3":
+                - 2
+                - 16
+                - 61
+            "4": 3.11.14
+            "5": 0.23.0
+            "6": 4.57.1
+            "12": 0.23.0
+            "13": linux-x86_64
+batch_size:
+    value: 32
+device:
+    value: cuda
+lambda_contrastive:
+    value: 0.1
+lr:
+    value: 1e-05
+lr_decoder:
+    value: 1e-05
+lr_encoder:
+    value: 1e-05
+stage:
+    value: encoder
+steps:
+    value: 3000
+target_len:
+    value: 60

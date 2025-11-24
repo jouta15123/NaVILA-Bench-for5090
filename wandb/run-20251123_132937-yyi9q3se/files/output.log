@@ -1,0 +1,97 @@
+Start Joint Training for 5000 steps... (stage=full)
+[Step 0001] Train Loss: 1.4499 (VAE: 1.1631, Cont: 2.8680)
+[Step 0100] Train Loss: 0.2114 (VAE: 0.0684, Cont: 1.4291)
+[Step 0200] Train Loss: 0.1961 (VAE: 0.0471, Cont: 1.4903)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.479 | MPJPE: 67.3223
+  >>> New Best Test Acc: 0.052! Saving model...
+[Step 0300] Train Loss: 0.2008 (VAE: 0.0490, Cont: 1.5176)
+[Step 0400] Train Loss: 0.2134 (VAE: 0.0551, Cont: 1.5827)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.490 | MPJPE: 68.9923
+[Step 0500] Train Loss: 0.2151 (VAE: 0.0475, Cont: 1.6758)
+[Step 0600] Train Loss: 0.1850 (VAE: 0.0437, Cont: 1.4128)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.177 | MPJPE: 67.4407
+[Step 0700] Train Loss: 0.1926 (VAE: 0.0368, Cont: 1.5583)
+[Step 0800] Train Loss: 0.2123 (VAE: 0.0449, Cont: 1.6740)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.021 | Acc@3: 0.531 | MPJPE: 66.8354
+[Step 0900] Train Loss: 0.1820 (VAE: 0.0388, Cont: 1.4324)
+[Step 1000] Train Loss: 0.2103 (VAE: 0.0405, Cont: 1.6983)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.042 | Acc@3: 0.146 | MPJPE: 69.2084
+[Step 1100] Train Loss: 0.1891 (VAE: 0.0458, Cont: 1.4331)
+[Step 1200] Train Loss: 0.1588 (VAE: 0.0386, Cont: 1.2024)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.115 | MPJPE: 69.5973
+[Step 1300] Train Loss: 0.1934 (VAE: 0.0433, Cont: 1.5007)
+[Step 1400] Train Loss: 0.1759 (VAE: 0.0405, Cont: 1.3539)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.146 | MPJPE: 68.5930
+[Step 1500] Train Loss: 0.1583 (VAE: 0.0353, Cont: 1.2300)
+[Step 1600] Train Loss: 0.1565 (VAE: 0.0474, Cont: 1.0915)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.042 | Acc@3: 0.156 | MPJPE: 68.1282
+[Step 1700] Train Loss: 0.1830 (VAE: 0.0422, Cont: 1.4083)
+[Step 1800] Train Loss: 0.1779 (VAE: 0.0442, Cont: 1.3368)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.188 | MPJPE: 68.3206
+[Step 1900] Train Loss: 0.1763 (VAE: 0.0417, Cont: 1.3455)
+[Step 2000] Train Loss: 0.1492 (VAE: 0.0388, Cont: 1.1043)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.010 | Acc@3: 0.469 | MPJPE: 68.8485
+[Step 2100] Train Loss: 0.1623 (VAE: 0.0419, Cont: 1.2033)
+[Step 2200] Train Loss: 0.1464 (VAE: 0.0329, Cont: 1.1347)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.052 | Acc@3: 0.167 | MPJPE: 67.4262
+[Step 2300] Train Loss: 0.1655 (VAE: 0.0358, Cont: 1.2966)
+[Step 2400] Train Loss: 0.1644 (VAE: 0.0384, Cont: 1.2602)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.031 | Acc@3: 0.125 | MPJPE: 67.4262
+[Step 2500] Train Loss: 0.1644 (VAE: 0.0373, Cont: 1.2707)
+[Step 2600] Train Loss: 0.1618 (VAE: 0.0422, Cont: 1.1954)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.208 | MPJPE: 69.5858
+  >>> New Best Test Acc: 0.073! Saving model...
+[Step 2700] Train Loss: 0.1389 (VAE: 0.0376, Cont: 1.0128)
+[Step 2800] Train Loss: 0.1371 (VAE: 0.0430, Cont: 0.9403)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.240 | MPJPE: 69.7053
+[Step 2900] Train Loss: 0.1337 (VAE: 0.0357, Cont: 0.9805)
+[Step 3000] Train Loss: 0.1200 (VAE: 0.0409, Cont: 0.7910)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.198 | MPJPE: 67.8213
+[Step 3100] Train Loss: 0.1359 (VAE: 0.0408, Cont: 0.9511)
+[Step 3200] Train Loss: 0.1355 (VAE: 0.0404, Cont: 0.9513)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.062 | Acc@3: 0.219 | MPJPE: 69.0878
+[Step 3300] Train Loss: 0.1194 (VAE: 0.0397, Cont: 0.7970)
+[Step 3400] Train Loss: 0.0978 (VAE: 0.0423, Cont: 0.5547)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.188 | MPJPE: 68.5055
+[Step 3500] Train Loss: 0.1109 (VAE: 0.0397, Cont: 0.7113)
+[Step 3600] Train Loss: 0.1114 (VAE: 0.0353, Cont: 0.7616)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.188 | MPJPE: 68.4247
+[Step 3700] Train Loss: 0.1114 (VAE: 0.0454, Cont: 0.6600)
+[Step 3800] Train Loss: 0.0831 (VAE: 0.0430, Cont: 0.4010)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.510 | MPJPE: 68.4789
+[Step 3900] Train Loss: 0.0791 (VAE: 0.0345, Cont: 0.4455)
+[Step 4000] Train Loss: 0.0887 (VAE: 0.0366, Cont: 0.5213)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.094 | Acc@3: 0.208 | MPJPE: 67.7647
+  >>> New Best Test Acc: 0.094! Saving model...
+[Step 4100] Train Loss: 0.0793 (VAE: 0.0393, Cont: 0.3994)
+[Step 4200] Train Loss: 0.0762 (VAE: 0.0345, Cont: 0.4171)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.073 | Acc@3: 0.198 | MPJPE: 68.6039
+[Step 4300] Train Loss: 0.0870 (VAE: 0.0340, Cont: 0.5296)
+[Step 4400] Train Loss: 0.1012 (VAE: 0.0388, Cont: 0.6240)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.083 | Acc@3: 0.208 | MPJPE: 67.6312
+[Step 4500] Train Loss: 0.0737 (VAE: 0.0305, Cont: 0.4320)
+[Step 4600] Train Loss: 0.0678 (VAE: 0.0332, Cont: 0.3452)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.083 | Acc@3: 0.208 | MPJPE: 68.3392

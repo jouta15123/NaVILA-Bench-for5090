@@ -1,259 +1,172 @@
 # 研究方針決定
 
-# 🔥 **研究全体の方針（最新版）**
+---
 
-## **0. まず大前提**
+# 🔥 研究全体の方針（改訂版）
 
-本質的にやりたいのは：
+## 0. 大前提
 
-> 「オノマトペの曖昧性を、身体性（モーション）側で理解させる」
-> 
-> 
-> ＝「未知オノマトペにも“らしい動き”を生成できる知的システム」
-> 
+やりたいこと：
 
-ナビゲーションに閉じすぎるより、
+> オノマトペの曖昧さを**身体運動（Motion）**で理解・生成できるモデルを作る  
+> ＝ 未知オノマトペでも“それっぽい歩き方”を出せるようにする
 
-**“移動系オノマトペに対応する身体表現を学ぶ”** 方向が主軸
-
-「LLMはなんとなくオノマトペを理解できているが、実際に動きとしてはオノマトペを理解できていないのではないか」
+テーマは **「移動系オノマトペ × 身体性」**。  
+Text-to-Motion でも単なる Navigation でもなく、語の意味を身体表現で理解する立場に立つ。
 
 ---
 
-# 1️⃣ **技術的コア：オノマトペ × 音韻 × 意味 × モーションの対照学習**
+# 1️⃣ 音韻 × 意味 × モーションの三本エンコーダ
 
-## **1-1. 三本のエンコーダを用意する**
+## 1-1. 役割
 
-- **phon encoder（音韻）**
-    
-    オノマトペ単体。文字・音の似さを捉える役。
-    
-- **sem encoder（意味）**
-    
-    周辺文脈や説明文から意味的特徴を抽出。
-    
-- **motion encoder（モーション）**
-    
-    MotionCLIP の motion tower を LoRA or 追加学習で拡張。
-    
+- **phon encoder（音韻）**  
+  オノマトペの文字列→音素/記号パターン。促音「っ」や長音「ー」などをきちんと扱う。未知語対応の要。
+- **sem encoder（意味）**  
+  文脈説明や LLM 生成文→意味ベクトル。Sarashina, SigLIP 等の日本語埋め込みを活用。
+- **motion encoder（モーション）**  
+  MotionCLIP をベース。HOYO 2D gait データで fine-tune して latent \(z_p\) を得る。
 
-→ **音韻と意味を分離した二因子モデル**が今のところ最適。
+## 1-2. 三方向の対照学習
 
-## **1-2. 対照学習は三方向**
+1. **sem ↔ motion（主軸）**  
+   – “さらさら” vs “ざらざら” を身体動作で分離。  
+2. **phon ↔ phon（補助）**  
+   – 表記ゆれや繰り返し構造を学習し、音が似る語同士を近づける。  
+3. **phon → sem（未知語ブリッジ）**  
+   – phon latent から sem latent を推定し、未知オノマトペの意味推定を可能にする。
 
-1. **意味 ↔ モーション（主役・最重要）**
-    
-    → “さらさら” vs “ざらざら” みたいな意味差はここでガッツリ分離。
-    
-2. **音韻 ↔ 音韻（補助）**
-    
-    → オノマトペ単体の構造を学ぶ（表記揺れ、促音、伸ばし棒など）。
-    
-3. **音韻 → 意味（弱いブリッジ）**
-    
-    → 未知オノマトペの意味を推定するためのマッピング。
-    
-    （“スルスル”が smooth 系、“ゴツゴツ”が rough 系になるように）
-    
-
-→ こうすれば
-
-**“音は似てるけど意味が真逆”**問題を完全に回避できる。
+> これで「音は似てるのに意味が真逆」問題を避けつつ、未知語の推論まで行ける。
 
 ---
 
-# 2️⃣ **MotionCLIP の活用方針**
+# 2️⃣ MotionCLIP latent の役割
 
-### MotionCLIP の motion encoder を：
-
-- **日本語版 CLIP のテキスト塔（あるなら）と alignment**
-- **LoRA で軽く finetune**
-- **対照学習の target motion space** として使う
-
-さらに：
-
-- **motion encoder の潜在 $z_p$ を low-level policy の入力に入れる**
-    
-    → “速度/加速度だけ渡す” より質感が表現できる。
-    
-    → 身体性宿るのはこの latent やから。
-    
-
-これは **速度・加速度入力に違和感ある**問題の解決策として最適。
+- 日本語埋め込み（Sarashina / SigLIP）と MotionCLIP を alignment させる。  
+- **低レベルRLには速度・加速度ではなく latent \(z_p\)** を渡す。  
+  – “ささっと”の軽さ、 “もたもた”の遅さ/ふらつき など質感を policy が直接扱える。
+- LangWBC でいう teacher/student 構造を参考に、  
+  1. **Teacher**: MotionCLIP 既存VAEを凍結 → 再構成性能を保持。  
+  2. **Student**: CVAE/contrastive でオノマトペ含む latent を獲得。
 
 ---
 
-# 3️⃣ **RL（PPO）との結合**
+# 3️⃣ RL (PPO) との統合
 
-### **方針**
+## 3-1. Policy 設計
 
-- low-level policy は
-    
-    $$
-    π(a∣s,zonm)\pi(a|s, z_{\text{onm}})
-    $$
-    
-    みたいに、**オノマトペ embedding を条件として動く**。
-    
-- reward は
-    
-    $$
-    r=rtask+β⋅cos⁡(zmot(agent),zsem)r = r_\text{task} + \beta \cdot \cos(z_\text{mot(agent)}, z_\text{sem})
-    $$
-    
-    みたいに style consistency を追加。
-    
-
-### **強化学習＋対照学習を joint に流す**
-
-PPO の loss に
+オノマトペ latent を条件にした policy：
 
 $$
-LPPO+λLcontrast\mathcal{L}_\text{PPO} + \lambda \mathcal{L}_\text{contrast}
+\pi(a \mid s,\; z_{\text{onm}})
 $$
 
-を入れる。
 
-→ 「RLで動きを学びながら、潜在空間もオノマトペに寄っていく」構造。
+## 3-2. Style Reward
 
-### **報酬関数は“意味側”を使う**
+エージェントの生成モーション \(z_{\text{mot(agent)}}\) が  
+指示オノマトペの意味ベクトル \(z_{\text{sem(onm)}}\) に近いほど、ご褒美：
 
-- “ざらざら”と“さらさら”をちゃんと分けるのは sem embedding。
-- phon は未知語処理の補助なので reward には使わない。
+$$
+r = r_{\text{task}}
+  + \beta \cdot 
+  \cos\left(
+      z_{\text{mot(agent)}},\;
+      z_{\text{sem(onm)}}
+  \right)
+$$
 
----
 
-# 4️⃣ **研究としての整理ポイント**
+## 3-3. Joint Optimization
 
-## **4-1. 研究目的を再定義**
+動作学習（PPO）と意味一致（対照学習）を同時に最適化：
 
-> 曖昧な移動指示（特にオノマトペ）を
-身体的モーションを通じて解釈・生成するモデルの提案
-> 
+$$
+\mathcal{L}
+=
+\mathcal{L}_{\text{PPO}}
++
+\lambda\;
+\mathcal{L}_{\text{contrast}}
+$$
 
-→ Text-to-Motion に寄りすぎず、
+LangWBC と同様に  
+**freeze → encoder-only → full fine-tune**  
+の段階的学習で安定化を図る。
 
-→ Navigation-only に縛られず、
-
-→ **身体性による意味理解** がテーマ。
-
-## **4-2. 関連研究の再整理ポイント**
-
-- 動作×言語の Text-to-Motion（MotionCLIP, TMR）
-- 和語オノマトペの音韻構造と意味構造
-- 曖昧指示（“ふわっと動いて”系）の人間ロボットインタラクション研究
-- navigation の high-level → low-level mapping
-- RL＋対照学習（CURL, C2RL, etc.）
-
----
-
-# 5️⃣ **データ面の方向性**
-
-## **5-1. 今すぐできること**
-
-- 歩容（gait）データセットを可視化
-    - joint range
-    - 速度分布
-    - 加速度
-    - オノマトペ別の差分
-
-→ ここで **オノマトペ×歩容の“地図”** を作る。
-
-## **5-2. humanoid への remap**
-
-- HOYO や sim-to-real ツールでリターゲット
-- 人間の歩容 → humanoid の可動範囲へマッピング
-- motionclip latent を変えず、関節 remap の層を作る
 
 ---
 
-# 6️⃣ **未知オノマトペへの対応戦略**
+# 4️⃣ 研究としての整理
 
-### **音韻 → 意味 → モーション**の三段構え：
+## 4-1. 目的（再定義）
+> 曖昧な移動指示（オノマトペ）を身体モーションを通じて解釈・生成するモデルの構築
 
-1. **音韻 p(w)p(w)p(w)**
-    
-    → 音から構造を学び、新語でも embedding 可能
-    
-2. **音韻→意味 F(p(w))F(p(w))F(p(w))**
-    
-    → 未知語の意味を予測
-    
-3. **意味→モーション**
-    
-    → 対照学習した latent space に投影
-    
-4. **low-level RL**
-    
-    → その latent に一致する動きを作る
-    
+- Text-to-Motion に寄りすぎず、Navigation限定でもない。  
+- **身体性による語意味理解** が主テーマ。
+
+## 4-2. 関連研究
+MotionCLIP / TMR, オノマトペ研究、LangWBC, RobotMDM, CURL/C2RL など。
 
 ---
 
-# 7️⃣ **最終的なプロジェクト方針（まとめ）**
+# 5️⃣ データとリターゲット
 
-### ✔ オノマトペ理解の中心は「意味 × モーション」
-
-（音韻は補助・未知語対応）
-
-### ✔ MotionCLIP を追加学習してモーション空間を獲得
-
-（速度/加速度をそのまま低レベルに渡すのはNG）
-
-### ✔ PPO low-level は motion latent を使用
-
-（身体性と質感を policy が使える形で渡す）
-
-### ✔ 強化学習と対照学習を joint optimize
-
-（対照損失は PPO loss に足す）
-
-### ✔ ナビゲーションに縛られない
-
-（移動系オノマトペの身体表現が本質）
+1. **HOYO / gait データの解析**  
+   – joint range, velocity, acceleration, step length, 周期などをオノマトペ別に地図化。  
+2. **Humanoid へのリターゲット**  
+   – HOYO 2D → H1/Isaac skeleton へ。MotionCLIP latent を壊さない補正層を追加。
 
 ---
 
-# 🧭 **To-Do リスト（実務ベース）**
+# 6️⃣ 未知オノマトペ対応
 
-## 今週（モデル決定）
+音韻 → 意味 → モーション → RL の四段構え
 
-- [ ]  **phon / sem / motion encoder の構成を確定**
-- [ ]  motion clip精読、境野論文精読, langWBC
-- [ ]  **対照損失（phon→sem, sem↔motion, phon↔phon）の係数決定**
-- [ ]  日本語CLIPのオノマトペ理解度の軽い予備実験
-    
-    → “さらさら”“ざらざら”“どしん”などで距離を調べる
-    
-- [ ]  MotionCLIP のコードベースどれ使うか決める
-1. motion clip精読、motionclip実装を見て理解を深める
-2. 埋め込みモデルがmotionclipにつなげれるのか？どうかの検討
-3. 強化学習にどうHOYOのデータを報酬として組み込むのか
-- [x]  歩容 dataset の可視化
+1. phon encoder で文字列を latent 化  
+2. phon→sem マッピングで意味推定  
+3. sem→motion latent へ投影  
+4. RL が latent に沿う動きを生成
 
-## 来週（実装開始）
+これで “ズリズリ” “フワリン” など未登録語でも“それっぽい”行動に。
 
-- [ ]  motion latent と semantic latent の距離分布をチェック
-- [ ]  オノマトペ別の歩容差分を解析（速度・振幅・周期）
-- [ ]  phon encoder の文字レベル前処理を実装
-- [ ]  phon→sem マッピング MLP を軽くテスト
+---
 
-## 2–3 週後（対照学習実行）
+# 7️⃣ 最終まとめ
 
-- [ ]  三本の encoder を合同で pretrain
-- [ ]  latent space を t-SNE 可視化
-- [ ]  “ざらざら vs さらさら” が sem space で分離してるか確認
-- [ ]  未知語（例：“ズリズリ”“フワリン”）の sem 予測が妥当か確認
+- ✔ 「意味 × モーション」の alignment が中心（音韻は未知語補助）  
+- ✔ MotionCLIP latent を policy 入力に使う（質感を直接渡す）  
+- ✔ PPO + Contrastive を同時に最適化  
+- ✔ ナビゲーションではなく“歩きの質感”がテーマ
 
-## 4 週後（RL 接続）
+---
 
-- [ ]  motion latent を low-level policy へ入力
-- [ ]  PPO + contrastive の joint training
-- [ ]  style reward のチューニング
-- [ ]  “らしさ”の定量化メトリクスを作る（rough/smooth 属性）
+# 🧭 To-Do（改訂版）
 
-最初に大胆に、ざっくりと挑戦
+## ✅ 今週：要件定義 & Teacher/Student 設計
+- [ ] phon / sem / motion encoder 構成を確定  
+- [ ] MotionCLIP / LangWBC を精読。freeze→encoder→full の段階設計をまとめる  
+- [ ] 三方向の contrastive loss と重みを決定  
+- [ ] Sarashina vs SigLIP のオノマトペ距離を評価  
+- [ ] MotionCLIP コードベース統合方針を決める  
+- [x] HOYO 歩容の可視化（済）
 
-それで労力を減らし、経過を丁寧に観察する
+## ▶ 来週：データ整備 + 前処理
+- [ ] motion / semantic latent の距離分布をチェック  
+- [ ] オノマトペ別の歩容差分（速度・周期・揺れ）を解析  
+- [ ] phon encoder 前処理（文字正規化・音素化）  
+- [ ] phon→sem MLP のプロトタイプ
 
-それで当たりをつけてから、細心に条件を設定する
+## ▶ 2–3 週後：対照学習
+- [ ] 三本の encoder（phon/sem/motion）を pretrain  
+- [ ] latent space を t-SNE/PCA で可視化  
+- [ ] “さらさら vs ざらざら” の分離を検証  
+- [ ] 未知語（例：ズリズリ, フワリン）の sem 予測実験
+
+## ▶ 4 週後：RL 接続
+- [ ] motion latent を low-level policy に入力  
+- [ ] PPO + contrastive の joint training  
+- [ ] Style reward のチューニング  
+- [ ] “歩行の質感”を測るメトリクスを定義
+
+> 最初に大胆に、経過を丁寧に、最後は細心に条件を整える。
