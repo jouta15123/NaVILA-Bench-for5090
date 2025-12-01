@@ -34,6 +34,17 @@ def main():
         default="latent_pca.png",
         help="Output PNG path for the visualization.",
     )
+    parser.add_argument(
+        "--label-mode",
+        type=str,
+        choices=["fine", "coarse"],
+        default="fine",
+        help=(
+            "How to display labels:\n"
+            "- 'fine': use snapshot labels as-is (11オノマトペ or 4スタイル).\n"
+            "- 'coarse': 11オノマトペを 4 スタイル群（速い系/遅い系/重い系/ふらふら系）にまとめて表示。"
+        ),
+    )
     args = parser.parse_args()
 
     snapshot_path = Path(args.snapshot)
@@ -47,11 +58,68 @@ def main():
     label_list = data["label_list"]  # (L,)
     z_s_cls = data["z_s_cls"]  # (L, D)
 
+    # ラベル文字列に揃えておく
+    label_list = [str(l) for l in label_list]
+
+    # --- ラベルモードに応じて、表示用ラベル / プロトタイプを準備 ---
+    # デフォルトは snapshot の粒度そのまま（fine / coarse どちらでも）
+    plot_label_names = label_list
+    plot_labels_idx = labels_idx
+    plot_z_s = z_s_cls
+
+    if args.label_mode == "coarse":
+        # HOYO の coarse スタイル定義（train_motionclip_joint.py / visualize_coarse_analysis.py と同じ）
+        COARSE_GROUPS = {
+            "速い系": ["すたすた", "せかせか", "てくてく"],
+            "遅い系": ["とぼとぼ", "のろのろ"],
+            "重い系": ["どっしどっし", "のしのし"],
+            "ふらふら系": ["ぶらぶら", "よたよた", "よろよろ"],
+        }
+
+        # もし snapshot 自体がすでに coarse ラベル（4つ）なら、そのまま使う。
+        # 11 オノマトペが入っている場合は、それらを 4 群にマージする。
+        label_to_idx = {lab: i for i, lab in enumerate(label_list)}
+
+        # 1) semantic prototypes を 4 群にまとめる
+        coarse_names = []
+        coarse_protos = []
+        for coarse_lab, fine_labs in COARSE_GROUPS.items():
+            idxs = [label_to_idx[fl] for fl in fine_labs if fl in label_to_idx]
+            if not idxs:
+                continue
+            coarse_names.append(coarse_lab)
+            coarse_protos.append(z_s_cls[idxs].mean(axis=0))
+        if coarse_protos:
+            plot_z_s = np.stack(coarse_protos, axis=0)
+            plot_label_names = coarse_names
+
+        # 2) 各サンプルのラベルを coarse インデックスに変換
+        coarse_name_to_idx = {name: i for i, name in enumerate(plot_label_names)}
+        new_labels_idx = []
+        for li in labels_idx:
+            lab = label_list[li]
+            # すでに coarse 名ならそのまま
+            if lab in coarse_name_to_idx:
+                new_labels_idx.append(coarse_name_to_idx[lab])
+                continue
+            # オノマトペを coarse グループにマッピング
+            mapped = None
+            for coarse_lab, fine_labs in COARSE_GROUPS.items():
+                if lab in fine_labs and coarse_lab in coarse_name_to_idx:
+                    mapped = coarse_name_to_idx[coarse_lab]
+                    break
+            # 「通常」などマップできないものは -1 として無視する
+            if mapped is None:
+                new_labels_idx.append(-1)
+            else:
+                new_labels_idx.append(mapped)
+        plot_labels_idx = np.asarray(new_labels_idx, dtype=int)
+
     # PCA to 2D on motion latents
     z_2d, mean_vec, components = pca_2d(z_m)
     # Project semantic prototypes into the same 2D space
-    z_s_center = z_s_cls - mean_vec
-    z_s_2d = z_s_center @ components.T  # (L, 2)
+    z_s_center = plot_z_s - mean_vec
+    z_s_2d = z_s_center @ components.T  # (L_plot, 2)
 
     try:
         import matplotlib.pyplot as plt
@@ -62,14 +130,14 @@ def main():
         ) from exc
 
     plt.figure(figsize=(8, 6))
-    label_list = [str(l) for l in label_list]
 
     # Plot motion latents per split / label
     markers = {"train": "o", "test": "x"}
     for split_name in sorted(set(splits)):
         split_mask = splits == split_name
-        for lab_idx, lab in enumerate(label_list):
-            mask = split_mask & (labels_idx == lab_idx)
+        for lab_idx, lab in enumerate(plot_label_names):
+            # ラベルが -1（coarse にマップできない）なサンプルはスキップ
+            mask = split_mask & (plot_labels_idx == lab_idx)
             if not np.any(mask):
                 continue
             plt.scatter(

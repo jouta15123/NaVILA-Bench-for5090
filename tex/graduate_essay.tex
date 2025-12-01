@@ -291,7 +291,7 @@ p_i =
 + \lambda_{\mathrm{contrast}}\,\mathcal{L}_{\mathrm{contrast}}
 \]
 であり，実験では $\lambda_{\mathrm{VAE}}=1.0$，
-$\lambda_{\mathrm{contrast}}\in\{0.3, 0.5\}$ を主に用いた．
+$\lambda_{\mathrm{contrast}}=0.1$ を主に用いた．
 
 \subsection{学習スケジュール}
 
@@ -612,16 +612,66 @@ phon/sem/motion の三本エンコーダを構成し，
 本稿で扱った sem$\leftrightarrow$motion の対照学習は，
 この三本構造のうち sem/motion 間を先に整備した段階に相当する．
 今後は，音韻表現（仮名列や音素系列）に対するエンコーダと，
-phon latent から sem latent を再構成する MLP を導入し，
-未知語に対しても
-「音韻 $\to$ 意味 $\to$ モーション latent」
-の経路を通じたスタイル付与を可能にする予定である．
+ phon latent から sem latent を再構成する MLP を導入し，
+ 未知語に対しても
+ 「音韻 $\to$ 意味 $\to$ モーション latent」
+ の経路を通じたスタイル付与を可能にする予定である．
 
 さらに，MotionCLIP 論文が行っているように，
 CLIP テキスト／画像エンコーダの latent 空間との alignment を
 補助的な損失として取り込むことで，
 より抽象的な言語指示や視覚的スタイル参照に対しても
 ロバストな質感ナビゲーションが可能かどうかを検証したい．
+
+\section{実験結果のまとめと可視化}
+
+\subsection{これまでに行った主なステップ}
+\begin{itemize}
+  \item HOYO 11 語データを重心平行移動・60 フレーム線形リサンプルし，train split の統計で正規化して test にも適用。
+  \item Sarashina / SigLIP で「$w$と歩いている。」「普通に歩いている。」を埋め込み，線形射影 \texttt{sem\_proj} で MotionCLIP latent（512 次元）に整合。
+  \item coarse 4 スタイル（速い／遅い／重い／ふらふら；通常は除外）で教師ありコントラスト学習（supcon）＋ VAE。温度は \texttt{logit\_scale} で学習し $[0.1, 10]$ にクランプ。
+  \item 段階学習：\texttt{stage=freeze} では encoder/decoder を凍結し $\lambda_{\mathrm{VAE}}=0$、\texttt{stage=encoder} で encoder を解凍（最新実験設定）、\texttt{stage=full} は今後の候補。
+  \item 最新 run（2025-11-24, stage=encoder, label\_mode=coarse, sem\_encoder=Sarashina, $\lambda_{\mathrm{contrast}}=0.1$）で Test Acc@1 $\approx 0.50$、Acc@3 $\approx 0.98$、MPJPE $\approx 0.87$。
+\end{itemize}
+
+\subsection{分類性能と混同行列}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\linewidth]{fig/confusion_matrix_coarse.png}
+  \caption{coarse 4 スタイルの混同行列（stage=encoder, Sarashina, supcon, $\lambda_{\mathrm{contrast}}=0.1$）。速い／遅い／重い／ふらふらの分離状況。}
+\end{figure}
+
+\subsection{潜在空間の可視化}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.48\linewidth]{fig/pca_coarse.png}
+  \includegraphics[width=0.48\linewidth]{fig/tsne_coarse.png}
+  \caption{MotionCLIP 潜在の PCA / t-SNE（coarse 4 スタイル）。緩やかなクラスタ分離を確認。}
+\end{figure}
+
+\subsection{類似度分布}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.6\linewidth]{fig/cosine_similarity_boxplot.png}
+  \caption{指示スタイルと MotionCLIP latent のコサイン類似度分布（正例／負例）。温度付き対照学習後に正例マージンが形成されている。}
+\end{figure}
+
+\subsection{軌跡の例（静止画化の推奨）}
+GIF は PDF に直接埋め込めないため，代表フレームを静止画に変換して挿入する。例：\texttt{hoyo\_all\_styles\_frame.png} を生成した場合，\IfFileExists{fig/hoyo_all_styles_frame.png}{
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.8\linewidth]{fig/hoyo_all_styles_frame.png}
+  \caption{4 スタイルの典型軌跡例（HOYO 生データの可視化）。}
+\end{figure}
+}{\emph{(静止画が生成され次第ここに挿入する)}}
+
+\subsection{今後の整合メモ}
+\begin{itemize}
+  \item 本文の $\lambda_{\mathrm{contrast}}$ 記述を実行値 0.1 に統一（済）。
+  \item coarse 実験では「通常」を除外している旨を明記（本節で補足）。
+  \item freeze 段階は $\lambda_{\mathrm{VAE}}=0$ で encoder/decoder を完全凍結する仕様を脚注等で補足する。
+\end{itemize}
+
 \begin{thebibliography}{99}
   {\footnotesize
   \bibitem{navila}

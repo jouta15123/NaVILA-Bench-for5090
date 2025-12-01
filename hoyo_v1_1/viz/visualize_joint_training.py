@@ -45,6 +45,9 @@ def visualize_joint_results():
     
     hoyo_root = HOYO_ROOT
     res_dir = hoyo_root / "joint_training_results"
+    ckpt_dir = res_dir / "checkpoints"
+    fig_dir = res_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
     if not res_dir.exists():
         print(f"Error: Results directory {res_dir} not found. Run training first.")
         return
@@ -53,9 +56,23 @@ def visualize_joint_results():
     target_len = 60
     model, params = load_motionclip_full_model(device, target_len)
     
-    model_path = res_dir / "motionclip_full_joint.pth"
-    if not model_path.exists():
-        print(f"Error: Model file {model_path} not found.")
+    ckpt_candidates = [
+        "motionclip_full_joint_final.pth",
+        "motionclip_full_joint_best.pth",
+        "motionclip_full_joint.pth",
+    ]
+    model_path = None
+    for name in ckpt_candidates:
+        p_new = ckpt_dir / name
+        p_old = res_dir / name
+        if p_new.exists():
+            model_path = p_new
+            break
+        if p_old.exists():
+            model_path = p_old
+            break
+    if model_path is None:
+        print("Error: No joint-trained MotionCLIP checkpoint found.")
         return
         
     state_dict = torch.load(model_path, map_location=device)
@@ -64,7 +81,24 @@ def visualize_joint_results():
     print("Loaded Joint Trained MotionCLIP Model.")
 
     # Load Projector
-    sem_proj_path = res_dir / "sem_proj_joint.pth"
+    sem_proj_candidates = [
+        "sem_proj_joint_final.pth",
+        "sem_proj_joint_best.pth",
+        "sem_proj_joint.pth",
+    ]
+    sem_proj_path = None
+    for name in sem_proj_candidates:
+        p_new = ckpt_dir / name
+        p_old = res_dir / name
+        if p_new.exists():
+            sem_proj_path = p_new
+            break
+        if p_old.exists():
+            sem_proj_path = p_old
+            break
+    if sem_proj_path is None:
+        print("Error: No sem_proj checkpoint found.")
+        return
     d_motion = model.latent_dim
     # Dummy encode to get dim
     sem_emb_dummy = encode_semantics_sarashina(INSTRUCTION_ONOMATOPEIA[:1], device)
@@ -170,9 +204,9 @@ def visualize_joint_results():
     plt.grid(alpha=0.3)
     # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(res_dir / "joint_space_pca.png", dpi=150)
+    plt.savefig(fig_dir / "joint_space_pca.png", dpi=150)
     plt.close()
-    print(f"Saved PCA plot to {res_dir / 'joint_space_pca.png'}")
+    print(f"Saved PCA plot to {fig_dir / 'joint_space_pca.png'}")
 
     # 5. Visualization 2: Reconstruction Quality
     # Plot trajectories of original vs reconstruction for a few classes
@@ -203,9 +237,9 @@ def visualize_joint_results():
         ax.axis('equal')
         
     plt.tight_layout()
-    plt.savefig(res_dir / "reconstruction_check.png", dpi=150)
+    plt.savefig(fig_dir / "reconstruction_check.png", dpi=150)
     plt.close()
-    print(f"Saved Reconstruction plot to {res_dir / 'reconstruction_check.png'}")
+    print(f"Saved Reconstruction plot to {fig_dir / 'reconstruction_check.png'}")
     
     # 6. Metric: Alignment Accuracy (Top-1 Retrieval)
     # Motion -> Text
@@ -231,9 +265,9 @@ def visualize_joint_results():
     plt.yticks(tick_marks, unique_labels)
     
     plt.tight_layout()
-    plt.savefig(res_dir / "confusion_matrix.png", dpi=150)
+    plt.savefig(fig_dir / "confusion_matrix.png", dpi=150)
     plt.close()
-    print(f"Saved Confusion Matrix to {res_dir / 'confusion_matrix.png'}")
+    print(f"Saved Confusion Matrix to {fig_dir / 'confusion_matrix.png'}")
 
 if __name__ == "__main__":
     visualize_joint_results()

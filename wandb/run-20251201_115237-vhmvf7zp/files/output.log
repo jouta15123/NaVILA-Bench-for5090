@@ -1,0 +1,112 @@
+[Init] Loaded sem_proj from /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints/sem_proj_joint_best.pth
+[Init] Loaded logit_scale from /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints/logit_scale_joint_best.pt
+Start Joint Training for 5000 steps... (stage=full)
+  Config: batch_size=32, lr=5e-05, lr_encoder=2e-05, lr_decoder=2e-05, lambda_vae=1.0, lambda_contrastive=0.5, temp=0.07
+[Step 00001] loss_total=1.6534 (vae=1.0223, cont=1.2621), train_acc@1=0.125, B=32, temp=0.1000, sim(pos=6.169, neg=4.459, n_pos=416, n_neg=3616)
+[Step 00100] loss_total=0.9696 (vae=0.1929, cont=1.5534), train_acc@1=0.102, B=32, temp=0.1000, sim(pos=7.179, neg=5.601, n_pos=456, n_neg=3576)
+[Step 00200] loss_total=0.8252 (vae=0.0544, cont=1.5416), train_acc@1=0.099, B=32, temp=0.1000, sim(pos=6.920, neg=5.212, n_pos=408, n_neg=3624)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.062 | Acc@3: 0.148 | MPJPE: 0.2128
+  >>> New Best Test Acc: 0.062! Saving model...
+[Step 00300] loss_total=0.8004 (vae=0.0410, cont=1.5188), train_acc@1=0.105, B=32, temp=0.1000, sim(pos=6.834, neg=5.223, n_pos=448, n_neg=3584)
+[Step 00400] loss_total=0.7857 (vae=0.0349, cont=1.5018), train_acc@1=0.120, B=32, temp=0.1000, sim(pos=6.634, neg=4.871, n_pos=416, n_neg=3616)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.039 | Acc@3: 0.141 | MPJPE: 0.1948
+[Step 00500] loss_total=0.7810 (vae=0.0349, cont=1.4921), train_acc@1=0.153, B=32, temp=0.1000, sim(pos=6.836, neg=4.820, n_pos=464, n_neg=3568)
+[Step 00600] loss_total=0.7611 (vae=0.0342, cont=1.4537), train_acc@1=0.170, B=32, temp=0.1000, sim(pos=7.101, neg=4.948, n_pos=408, n_neg=3624)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.047 | Acc@3: 0.148 | MPJPE: 0.1967
+[Step 00700] loss_total=0.7335 (vae=0.0319, cont=1.4032), train_acc@1=0.188, B=32, temp=0.1000, sim(pos=7.088, neg=4.608, n_pos=400, n_neg=3632)
+[Step 00800] loss_total=0.7119 (vae=0.0308, cont=1.3623), train_acc@1=0.209, B=32, temp=0.1000, sim(pos=7.081, neg=4.535, n_pos=424, n_neg=3608)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.055 | Acc@3: 0.180 | MPJPE: 0.2535
+[Step 00900] loss_total=0.6694 (vae=0.0343, cont=1.2701), train_acc@1=0.263, B=32, temp=0.1000, sim(pos=6.994, neg=3.513, n_pos=408, n_neg=3624)
+[Step 01000] loss_total=0.6227 (vae=0.0349, cont=1.1755), train_acc@1=0.294, B=32, temp=0.1000, sim(pos=6.653, neg=3.396, n_pos=400, n_neg=3632)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.102 | Acc@3: 0.219 | MPJPE: 0.2015
+  >>> New Best Test Acc: 0.102! Saving model...
+[Step 01100] loss_total=0.5787 (vae=0.0358, cont=1.0857), train_acc@1=0.351, B=32, temp=0.1000, sim(pos=6.628, neg=3.180, n_pos=392, n_neg=3640)
+[Step 01200] loss_total=0.5471 (vae=0.0353, cont=1.0236), train_acc@1=0.362, B=32, temp=0.1000, sim(pos=6.159, neg=2.935, n_pos=352, n_neg=3680)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.117 | Acc@3: 0.273 | MPJPE: 0.2291
+  >>> New Best Test Acc: 0.117! Saving model...
+[Step 01300] loss_total=0.5175 (vae=0.0352, cont=0.9646), train_acc@1=0.395, B=32, temp=0.1000, sim(pos=6.384, neg=2.006, n_pos=560, n_neg=3472)
+[Step 01400] loss_total=0.5061 (vae=0.0336, cont=0.9450), train_acc@1=0.391, B=32, temp=0.1000, sim(pos=6.373, neg=1.948, n_pos=384, n_neg=3648)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.133 | Acc@3: 0.258 | MPJPE: 0.1920
+  >>> New Best Test Acc: 0.133! Saving model...
+[Step 01500] loss_total=0.4921 (vae=0.0334, cont=0.9172), train_acc@1=0.405, B=32, temp=0.1000, sim(pos=6.322, neg=2.059, n_pos=400, n_neg=3632)
+[Step 01600] loss_total=0.4827 (vae=0.0328, cont=0.8999), train_acc@1=0.413, B=32, temp=0.1000, sim(pos=5.878, neg=2.317, n_pos=440, n_neg=3592)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.141 | Acc@3: 0.289 | MPJPE: 0.1918
+  >>> New Best Test Acc: 0.141! Saving model...
+[Step 01700] loss_total=0.4670 (vae=0.0321, cont=0.8697), train_acc@1=0.430, B=32, temp=0.1000, sim(pos=5.823, neg=2.061, n_pos=384, n_neg=3648)
+[Step 01800] loss_total=0.4510 (vae=0.0315, cont=0.8389), train_acc@1=0.446, B=32, temp=0.1000, sim(pos=5.551, neg=1.438, n_pos=400, n_neg=3632)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.117 | Acc@3: 0.289 | MPJPE: 0.1892
+[Step 01900] loss_total=0.4405 (vae=0.0309, cont=0.8192), train_acc@1=0.459, B=32, temp=0.1000, sim(pos=5.583, neg=1.320, n_pos=424, n_neg=3608)
+[Step 02000] loss_total=0.4443 (vae=0.0300, cont=0.8287), train_acc@1=0.453, B=32, temp=0.1000, sim(pos=5.545, neg=1.434, n_pos=416, n_neg=3616)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.078 | Acc@3: 0.266 | MPJPE: 0.1936
+[Step 02100] loss_total=0.4229 (vae=0.0298, cont=0.7862), train_acc@1=0.481, B=32, temp=0.1000, sim(pos=5.810, neg=1.054, n_pos=352, n_neg=3680)
+[Step 02200] loss_total=0.4175 (vae=0.0299, cont=0.7753), train_acc@1=0.488, B=32, temp=0.1000, sim(pos=5.908, neg=1.334, n_pos=432, n_neg=3600)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.109 | Acc@3: 0.297 | MPJPE: 0.1781
+[Step 02300] loss_total=0.4156 (vae=0.0289, cont=0.7733), train_acc@1=0.474, B=32, temp=0.1000, sim(pos=5.326, neg=1.125, n_pos=392, n_neg=3640)
+[Step 02400] loss_total=0.4019 (vae=0.0279, cont=0.7479), train_acc@1=0.493, B=32, temp=0.1000, sim(pos=5.516, neg=1.243, n_pos=448, n_neg=3584)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.125 | Acc@3: 0.305 | MPJPE: 0.1766
+[Step 02500] loss_total=0.4033 (vae=0.0277, cont=0.7512), train_acc@1=0.511, B=32, temp=0.1000, sim(pos=6.020, neg=1.572, n_pos=376, n_neg=3656)
+[Step 02600] loss_total=0.3928 (vae=0.0276, cont=0.7304), train_acc@1=0.517, B=32, temp=0.1000, sim(pos=6.313, neg=0.603, n_pos=416, n_neg=3616)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.125 | Acc@3: 0.305 | MPJPE: 0.1798
+[Step 02700] loss_total=0.3941 (vae=0.0271, cont=0.7340), train_acc@1=0.516, B=32, temp=0.1000, sim(pos=6.323, neg=0.306, n_pos=408, n_neg=3624)
+[Step 02800] loss_total=0.3777 (vae=0.0266, cont=0.7022), train_acc@1=0.525, B=32, temp=0.1000, sim(pos=5.402, neg=0.765, n_pos=488, n_neg=3544)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.133 | Acc@3: 0.312 | MPJPE: 0.1814
+[Step 02900] loss_total=0.3757 (vae=0.0267, cont=0.6980), train_acc@1=0.526, B=32, temp=0.1000, sim(pos=5.962, neg=0.385, n_pos=488, n_neg=3544)
+[Step 03000] loss_total=0.3727 (vae=0.0262, cont=0.6929), train_acc@1=0.541, B=32, temp=0.1000, sim(pos=5.528, neg=0.376, n_pos=424, n_neg=3608)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.141 | Acc@3: 0.297 | MPJPE: 0.1747
+[Step 03100] loss_total=0.3634 (vae=0.0253, cont=0.6760), train_acc@1=0.556, B=32, temp=0.1000, sim(pos=6.339, neg=0.346, n_pos=544, n_neg=3488)
+[Step 03200] loss_total=0.3470 (vae=0.0247, cont=0.6447), train_acc@1=0.561, B=32, temp=0.1000, sim(pos=6.089, neg=0.330, n_pos=456, n_neg=3576)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.109 | Acc@3: 0.305 | MPJPE: 0.1714
+[Step 03300] loss_total=0.3383 (vae=0.0252, cont=0.6262), train_acc@1=0.580, B=32, temp=0.1000, sim(pos=5.751, neg=0.410, n_pos=328, n_neg=3704)
+[Step 03400] loss_total=0.3482 (vae=0.0246, cont=0.6472), train_acc@1=0.571, B=32, temp=0.1000, sim(pos=5.819, neg=0.767, n_pos=360, n_neg=3672)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.117 | Acc@3: 0.305 | MPJPE: 0.1768
+[Step 03500] loss_total=0.3333 (vae=0.0245, cont=0.6175), train_acc@1=0.591, B=32, temp=0.1000, sim(pos=6.076, neg=0.030, n_pos=352, n_neg=3680)
+[Step 03600] loss_total=0.3235 (vae=0.0237, cont=0.5996), train_acc@1=0.594, B=32, temp=0.1000, sim(pos=5.709, neg=-0.085, n_pos=424, n_neg=3608)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.117 | Acc@3: 0.297 | MPJPE: 0.1665
+[Step 03700] loss_total=0.3203 (vae=0.0237, cont=0.5931), train_acc@1=0.600, B=32, temp=0.1000, sim(pos=5.518, neg=0.222, n_pos=392, n_neg=3640)
+[Step 03800] loss_total=0.3174 (vae=0.0232, cont=0.5884), train_acc@1=0.613, B=32, temp=0.1000, sim(pos=5.579, neg=0.079, n_pos=400, n_neg=3632)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.117 | Acc@3: 0.312 | MPJPE: 0.1620
+[Step 03900] loss_total=0.3188 (vae=0.0230, cont=0.5917), train_acc@1=0.603, B=32, temp=0.1000, sim(pos=5.734, neg=0.125, n_pos=472, n_neg=3560)
+[Step 04000] loss_total=0.3018 (vae=0.0223, cont=0.5590), train_acc@1=0.623, B=32, temp=0.1000, sim(pos=6.087, neg=-0.307, n_pos=440, n_neg=3592)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.133 | Acc@3: 0.297 | MPJPE: 0.1657
+[Step 04100] loss_total=0.2981 (vae=0.0227, cont=0.5508), train_acc@1=0.627, B=32, temp=0.1000, sim(pos=6.040, neg=-0.008, n_pos=504, n_neg=3528)
+[Step 04200] loss_total=0.2971 (vae=0.0224, cont=0.5493), train_acc@1=0.641, B=32, temp=0.1000, sim(pos=6.042, neg=0.320, n_pos=392, n_neg=3640)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.125 | Acc@3: 0.328 | MPJPE: 0.1654
+[Step 04300] loss_total=0.2946 (vae=0.0223, cont=0.5446), train_acc@1=0.639, B=32, temp=0.1000, sim(pos=6.250, neg=-0.302, n_pos=416, n_neg=3616)
+[Step 04400] loss_total=0.2896 (vae=0.0217, cont=0.5359), train_acc@1=0.641, B=32, temp=0.1000, sim(pos=5.618, neg=-0.079, n_pos=432, n_neg=3600)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.133 | Acc@3: 0.328 | MPJPE: 0.1636
+[Step 04500] loss_total=0.2778 (vae=0.0215, cont=0.5127), train_acc@1=0.661, B=32, temp=0.1000, sim(pos=6.156, neg=0.023, n_pos=424, n_neg=3608)
+[Step 04600] loss_total=0.2724 (vae=0.0208, cont=0.5031), train_acc@1=0.659, B=32, temp=0.1000, sim(pos=5.970, neg=0.054, n_pos=408, n_neg=3624)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.102 | Acc@3: 0.312 | MPJPE: 0.1603
+[Step 04700] loss_total=0.2642 (vae=0.0203, cont=0.4878), train_acc@1=0.672, B=32, temp=0.1000, sim(pos=5.828, neg=0.126, n_pos=464, n_neg=3568)
+[Step 04800] loss_total=0.2695 (vae=0.0206, cont=0.4980), train_acc@1=0.671, B=32, temp=0.1000, sim(pos=5.781, neg=-0.003, n_pos=440, n_neg=3592)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.094 | Acc@3: 0.328 | MPJPE: 0.1639
+[Step 04900] loss_total=0.2653 (vae=0.0205, cont=0.4896), train_acc@1=0.674, B=32, temp=0.1000, sim(pos=6.110, neg=0.157, n_pos=440, n_neg=3592)
+[Step 05000] loss_total=0.2471 (vae=0.0204, cont=0.4534), train_acc@1=0.697, B=32, temp=0.1000, sim(pos=6.543, neg=-0.414, n_pos=360, n_neg=3672)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.125 | Acc@3: 0.289 | MPJPE: 0.1658
+Saving final models to /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints
+Saved latent snapshot with 292 points to /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/latent_snapshot_final.npz

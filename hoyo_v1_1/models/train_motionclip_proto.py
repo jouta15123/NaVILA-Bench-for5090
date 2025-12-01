@@ -351,7 +351,7 @@ def parse_args():
         default=None,
         help=(
             "Optional path to a pretrained MotionCLIP checkpoint "
-            "(e.g., joint_training_results/motionclip_full_joint_best.pth). "
+            "(e.g., joint_training_results/checkpoints/motionclip_full_joint_best.pth). "
             "If not provided, the default HOYO-adapted MotionCLIP will be used."
         ),
     )

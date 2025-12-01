@@ -1,6 +1,9 @@
 import os
 import sys
 import json
+import inspect
+from collections import namedtuple
+
 import torch
 import numpy as np
 import matplotlib
@@ -10,6 +13,34 @@ import japanize_matplotlib
 from pathlib import Path
 import torch.nn.functional as F
 from sklearn.manifold import TSNE
+
+# ---------------------------------------------------------------------------
+# Compatibility patches for old libraries (e.g., chumpy, smplx) on Python 3.11+.
+# 1) chumpy still uses inspect.getargspec, which was removed in 3.11.
+# 2) chumpy imports deprecated NumPy aliases (np.int, np.float, ...).
+# We recreate these shims here so that MotionCLIP can be loaded.
+# ---------------------------------------------------------------------------
+if not hasattr(inspect, "getargspec"):
+    ArgSpec = namedtuple("ArgSpec", ["args", "varargs", "keywords", "defaults"])
+
+    def _compat_getargspec(func):
+        spec = inspect.getfullargspec(func)
+        return ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
+
+    inspect.getargspec = _compat_getargspec  # type: ignore[attr-defined]
+
+_legacy_numpy_types = [
+    ("bool", bool),
+    ("int", int),
+    ("float", float),
+    ("complex", complex),
+    ("object", object),
+    ("str", str),
+    ("unicode", str),
+]
+for _name, _type in _legacy_numpy_types:
+    if not hasattr(np, _name):
+        setattr(np, _name, _type)
 
 # Import MotionCLIP dynamically
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +83,9 @@ def visualize_joint_results():
     
     hoyo_root = ROOT / "hoyo_v1_1"
     res_dir = hoyo_root / "joint_training_results"
+    ckpt_dir = res_dir / "checkpoints"
+    fig_dir = res_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
     if not res_dir.exists():
         print(f"Error: Results directory {res_dir} not found. Run training first.")
         return
@@ -59,19 +93,53 @@ def visualize_joint_results():
     # 1. Load Model & Projector
     target_len = 60
     model, params = load_motionclip_full_model(device, target_len)
-    
-    model_path = res_dir / "motionclip_full_joint.pth"
-    if not model_path.exists():
-        print(f"Error: Model file {model_path} not found.")
+
+    # Prefer FINAL / BEST checkpoints if available
+    model_candidates = [
+        "motionclip_full_joint_final.pth",
+        "motionclip_full_joint_best.pth",
+        "motionclip_full_joint.pth",
+    ]
+    model_path = None
+    for name in model_candidates:
+        p_new = ckpt_dir / name
+        p_old = res_dir / name
+        if p_new.exists():
+            model_path = p_new
+            break
+        if p_old.exists():
+            model_path = p_old
+            break
+    if model_path is None:
+        print("Error: No joint-trained MotionCLIP checkpoint found.")
         return
-        
+    print(f"Loading MotionCLIP model from: {model_path}")
+
     state_dict = torch.load(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.eval()
     print("Loaded Joint Trained MotionCLIP Model.")
 
-    # Load Projector
-    sem_proj_path = res_dir / "sem_proj_joint.pth"
+    # Load Projector (prefer FINAL / BEST if available)
+    sem_proj_candidates = [
+        "sem_proj_joint_final.pth",
+        "sem_proj_joint_best.pth",
+        "sem_proj_joint.pth",
+    ]
+    sem_proj_path = None
+    for name in sem_proj_candidates:
+        p_new = ckpt_dir / name
+        p_old = res_dir / name
+        if p_new.exists():
+            sem_proj_path = p_new
+            break
+        if p_old.exists():
+            sem_proj_path = p_old
+            break
+    if sem_proj_path is None:
+        print("Error: No sem_proj checkpoint found.")
+        return
+    print(f"Loading semantic projector from: {sem_proj_path}")
     d_motion = model.latent_dim
     # Dummy encode to get dim
     sem_emb_dummy = encode_semantics_sarashina(INSTRUCTION_ONOMATOPEIA[:1], device)
@@ -109,6 +177,10 @@ def visualize_joint_results():
     all_labels = []
     all_recons = []
     all_originals = []
+
+    # Reconstruction error stats (per fine label)
+    mpjpe_sums = {lab: 0.0 for lab in INSTRUCTION_ONOMATOPEIA}
+    mpjpe_counts = {lab: 0 for lab in INSTRUCTION_ONOMATOPEIA}
     
     print("Computing motion embeddings...")
     with torch.no_grad():
@@ -130,19 +202,56 @@ def visualize_joint_results():
                 out = model(batch)
                 z = out["mu"]
                 z = F.normalize(z, dim=-1)
-                
+
+                # Motion latent for joint PCA
                 all_z_motion.append(z.cpu().numpy()[0])
                 all_labels.append(lab)
-                
-                if i < 1: # Save first sample of each label for recon check
-                    # Denormalize
-                    rec = out["output"].cpu().numpy()[0].transpose(2, 0, 1) # (T, 14, 2)
-                    rec = rec * data_std + data_mean
-                    orig = arr * data_std + data_mean
+
+                # Reconstruction in normalized HOYO座標系 (T, 14, 2)
+                rec_norm = out["output"].cpu().numpy()[0].transpose(2, 0, 1)
+                orig_norm = arr  # 既に (T, 14, 2) で正規化済み
+
+                # MPJPE（2D）: 各フレーム・各関節での L2 距離の平均
+                diff = rec_norm - orig_norm
+                mpjpe = np.linalg.norm(diff, axis=2).mean()
+                mpjpe_sums[lab] += float(mpjpe)
+                mpjpe_counts[lab] += 1
+
+                # 可視化用に最初のサンプルだけ保存（実座標に戻す）
+                if i < 1:
+                    rec = rec_norm * data_std + data_mean
+                    orig = orig_norm * data_std + data_mean
                     all_recons.append(rec)
                     all_originals.append(orig)
 
     all_z_motion = np.stack(all_z_motion, axis=0)
+
+    # ------ Print reconstruction stats (fine + coarse) ------
+    print("\n[Reconstruction MPJPE (2D, normalized units)]")
+    for lab in INSTRUCTION_ONOMATOPEIA:
+        if mpjpe_counts[lab] == 0:
+            continue
+        mean_err = mpjpe_sums[lab] / mpjpe_counts[lab]
+        print(f"  {lab}: {mean_err:.4f}  (N={mpjpe_counts[lab]})")
+
+    # Coarse 4-style aggregation
+    COARSE_GROUPS = {
+        "速い系": ["すたすた", "せかせか", "てくてく"],
+        "遅い系": ["とぼとぼ", "のろのろ"],
+        "重い系": ["どっしどっし", "のしのし"],
+        "ふらふら系": ["ぶらぶら", "よたよた", "よろよろ"],
+    }
+    print("\n[Reconstruction MPJPE aggregated per coarse style]")
+    for coarse, fines in COARSE_GROUPS.items():
+        num = 0
+        denom = 0.0
+        for fl in fines:
+            if mpjpe_counts.get(fl, 0) > 0:
+                num += mpjpe_counts[fl]
+                denom += mpjpe_sums[fl]
+        if num == 0:
+            continue
+        print(f"  {coarse}: {denom/num:.4f}  (N={num})")
     
     # 4. Visualization 1: Latent Space (PCA)
     # Combine Text and Motion for joint plot
@@ -177,42 +286,61 @@ def visualize_joint_results():
     plt.grid(alpha=0.3)
     # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
     plt.tight_layout()
-    plt.savefig(res_dir / "joint_space_pca.png", dpi=150)
+    plt.savefig(fig_dir / "joint_space_pca.png", dpi=150)
     plt.close()
-    print(f"Saved PCA plot to {res_dir / 'joint_space_pca.png'}")
+    print(f"Saved PCA plot to {fig_dir / 'joint_space_pca.png'}")
 
     # 5. Visualization 2: Reconstruction Quality
-    # Plot trajectories of original vs reconstruction for a few classes
+    # Plot trajectories of original vs reconstruction for a few classes.
+    #  - 統一スケールで 2 関節 (J0, J7) の軌跡を比較
+    #  - 開始 / 終了点をマーカーで明示して、どこからどこまで歩いたかを可視化
     fig, axes = plt.subplots(4, 3, figsize=(15, 20))
     axes = axes.flatten()
-    
-    for i, lab in enumerate(unique_labels[:12]): # Limit to first 12
-        if i >= len(axes): break
+
+    # 全サンプル共通の表示レンジ（比較しやすくするため）
+    xs_all = []
+    ys_all = []
+    for arr in all_originals:
+        xs_all.append(arr[:, :, 0].reshape(-1))
+        ys_all.append(arr[:, :, 1].reshape(-1))
+    xs_all = np.concatenate(xs_all)
+    ys_all = np.concatenate(ys_all)
+    x_min, x_max = xs_all.min(), xs_all.max()
+    y_min, y_max = ys_all.min(), ys_all.max()
+
+    for i, lab in enumerate(unique_labels[:12]):  # Limit to first 12
+        if i >= len(axes):
+            break
         ax = axes[i]
-        
-        orig = all_originals[i]
-        rec = all_recons[i]
-        
-        # Plot simple trajectory of one joint (e.g., Root or Foot)
-        # shape: (T, 14, 2) -> Take joint 0 (Hips?) and joint 3 (LeftFoot?)
-        # Assuming COCO-17 like layout, but indices might vary. Just picking joint 0 and 7 (extremities)
-        
-        # Original
-        ax.plot(orig[:, 0, 0], orig[:, 0, 1], 'b-', alpha=0.5, label='Orig J0')
-        ax.plot(orig[:, 7, 0], orig[:, 7, 1], 'c-', alpha=0.5, label='Orig J7')
-        
-        # Recon
-        ax.plot(rec[:, 0, 0], rec[:, 0, 1], 'r--', label='Rec J0')
-        ax.plot(rec[:, 7, 0], rec[:, 7, 1], 'm--', label='Rec J7')
-        
+
+        orig = all_originals[i]  # (T, 14, 2)
+        rec = all_recons[i]      # (T, 14, 2)
+
+        # Original (solid lines)
+        ax.plot(orig[:, 0, 0], orig[:, 0, 1], "b-", alpha=0.6, label="Orig J0")
+        ax.plot(orig[:, 7, 0], orig[:, 7, 1], "c-", alpha=0.6, label="Orig J7")
+
+        # Reconstruction (dashed lines)
+        ax.plot(rec[:, 0, 0], rec[:, 0, 1], "r--", alpha=0.8, label="Rec J0")
+        ax.plot(rec[:, 7, 0], rec[:, 7, 1], "m--", alpha=0.8, label="Rec J7")
+
+        # Start / end markers（J0 のみ）
+        ax.scatter(orig[0, 0, 0], orig[0, 0, 1], c="k", s=20, marker="o")
+        ax.scatter(orig[-1, 0, 0], orig[-1, 0, 1], c="k", s=20, marker="x")
+
         ax.set_title(f"Reconstruction: {lab}")
-        ax.legend(fontsize='small')
-        ax.axis('equal')
-        
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect("equal", adjustable="box")
+
+        # 凡例は左上のサブプロットだけに表示して、図全体のゴチャゴチャを減らす
+        if i == 0:
+            ax.legend(fontsize="small", loc="upper left")
+
     plt.tight_layout()
-    plt.savefig(res_dir / "reconstruction_check.png", dpi=150)
+    plt.savefig(fig_dir / "reconstruction_check.png", dpi=150)
     plt.close()
-    print(f"Saved Reconstruction plot to {res_dir / 'reconstruction_check.png'}")
+    print(f"Saved Reconstruction plot to {fig_dir / 'reconstruction_check.png'}")
     
     # 6. Metric: Alignment Accuracy (Top-1 Retrieval)
     # Motion -> Text
@@ -238,9 +366,9 @@ def visualize_joint_results():
     plt.yticks(tick_marks, unique_labels)
     
     plt.tight_layout()
-    plt.savefig(res_dir / "confusion_matrix.png", dpi=150)
+    plt.savefig(fig_dir / "confusion_matrix.png", dpi=150)
     plt.close()
-    print(f"Saved Confusion Matrix to {res_dir / 'confusion_matrix.png'}")
+    print(f"Saved Confusion Matrix to {fig_dir / 'confusion_matrix.png'}")
 
 if __name__ == "__main__":
     visualize_joint_results()

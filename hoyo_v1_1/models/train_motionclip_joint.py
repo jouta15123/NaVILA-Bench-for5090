@@ -91,6 +91,13 @@ class Tee:
         for s in self.streams:
             s.flush()
 
+    def isatty(self):
+        """Check if any of the streams is a TTY."""
+        for s in self.streams:
+            if hasattr(s, "isatty") and s.isatty():
+                return True
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Coarse style groups for sanity-check experiments
@@ -128,6 +135,8 @@ def load_motionclip_full_model(device: torch.device, target_len: int = 60):
     # Adjust for HOYO (2D raw coords)
     params["pose_rep"] = "xyz"  # Treat as raw coordinates
     params["outputxyz"] = False # Don't try to convert to SMPL mesh
+    params["glob"] = True       # Global rotation (though unused in xyz mode, good for safety)
+    params["translation"] = True # We include translation-like features (raw coords)
     
     # Only keep generic losses
     params["lambdas"] = {"rc": 1.0, "vel": 1.0} 
@@ -165,8 +174,14 @@ def split_dataset(dataset: HoyoInstructionDataset, ratio: float = 0.8):
     """
     import copy
     
+    # Deepcopy to ensure independent sample lists
+    # Note: is_train flag will be set individually
     train_ds = copy.copy(dataset)
     test_ds = copy.copy(dataset)
+    
+    # IMPORTANT: Set crop mode
+    train_ds.is_train = True
+    test_ds.is_train = False
     
     train_ds.samples_by_label = {}
     test_ds.samples_by_label = {}
@@ -247,11 +262,41 @@ def evaluate_dataset(
     total_mpjpe = 0.0
     valid_batches = 0
     
+    # Collect fixed crop samples for evaluation
     all_samples = []
+    # Evaluate every sequence in the test set (using fixed center crop)
     for i, lab in enumerate(labels):
-        samples = dataset.samples_by_label[lab]
-        for s in samples:
-            all_samples.append((s, i))
+        raw_samples = dataset.samples_by_label.get(lab, [])
+        for _ in raw_samples:
+            # get_sample() will perform center crop because dataset.is_train should be False
+            # Note: Since get_sample picks a random sample from the list, we cannot easily iterate
+            # all samples deterministically if we use get_sample().
+            # However, get_sample() implementation in dataset picks randomly.
+            # To evaluate ALL samples exactly once, we need a slight workaround or trust randomness/repeat.
+            
+            # WORKAROUND: Iterate raw list and manually process OR 
+            # just rely on random sampling for 'len(samples)' times.
+            # Since get_sample picks random from list, we might miss some and duplicate others.
+            # For strict evaluation, we should manually crop all samples.
+            pass
+        
+        # Manual deterministic iteration
+        tgt = dataset.target_len
+        for raw_seq in raw_samples:
+            T = raw_seq.shape[0]
+            if T > tgt:
+                start = (T - tgt) // 2
+                cropped = raw_seq[start : start + tgt]
+            else:
+                pad_len = tgt - T
+                cropped = np.pad(raw_seq, ((0, pad_len), (0, 0), (0, 0)), mode="edge")
+            
+            # 修正: 評価時も学習時と同じく「最初のフレームの重心」だけ引く（移動を残す）
+            # Local Centering (First frame relative)
+            com0 = cropped[0].mean(axis=0, keepdims=True)  # (1, 2)
+            centered = cropped - com0
+            
+            all_samples.append((centered.astype(np.float32), i))
     
     if not all_samples:
         return {"acc@1": 0.0, "acc@3": 0.0, "mpjpe": 0.0}
@@ -333,9 +378,7 @@ def dump_latent_snapshot(
     max_per_label: int = 50,
 ):
     """
-    Collects a small subset of motion latents and their labels from both the
-    train/test splits, together with the semantic prototypes, and saves them
-    as a .npz file for later visualization (e.g., PCA / t-SNE in a notebook).
+    Collects a small subset of motion latents and their labels.
     """
     model.eval()
 
@@ -354,14 +397,16 @@ def dump_latent_snapshot(
 
     def _gather_from_split(ds: HoyoInstructionDataset, split_name: str):
         for lab_idx, lab in enumerate(labels):
-            samples = ds.samples_by_label.get(lab, [])
-            if not samples:
+            # Just sample N random crops
+            samples_list = ds.samples_by_label.get(lab, [])
+            if not samples_list:
                 continue
-            n_take = min(len(samples), max_per_label)
-            chosen = random.sample(samples, n_take)
-
-            for arr in chosen:
-                # arr: (T, 14, 2)  -> (1, J, C, T)
+            
+            n_take = min(len(samples_list), max_per_label)
+            # Use get_sample() n_take times
+            for _ in range(n_take):
+                arr = ds.get_sample(lab) # (T, 14, 2)
+                
                 coords = arr[np.newaxis, ...].transpose(0, 2, 3, 1)
                 x = torch.from_numpy(coords).to(device)
 
@@ -431,6 +476,8 @@ def train_joint(
     wandb_run=None,
 ):
     os.makedirs(out_dir, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     
     # Projector for semantics -> motion latent space
     # MotionCLIP latent dim is 512 (default)
@@ -441,8 +488,8 @@ def train_joint(
     logit_scale = nn.Parameter(torch.ones([]) * np.log(1.0 / temp))
 
     # Optionally initialize from previous stage checkpoints (e.g., freeze -> encoder)
-    sem_proj_ckpt = out_dir / "sem_proj_joint_best.pth"
-    logit_scale_ckpt = out_dir / "logit_scale_joint_best.pt"
+    sem_proj_ckpt = ckpt_dir / "sem_proj_joint_best.pth"
+    logit_scale_ckpt = ckpt_dir / "logit_scale_joint_best.pt"
     if stage in ("encoder", "full") and sem_proj_ckpt.exists():
         try:
             sem_state = torch.load(sem_proj_ckpt, map_location=device)
@@ -536,16 +583,27 @@ def train_joint(
         for _ in range(batch_size):
             lab_idx = random.randint(0, len(labels) - 1)
             lab = labels[lab_idx]
-            samples = train_dataset.samples_by_label.get(lab, [])
-            if not samples:
+            
+            # Check if data exists for this label
+            if not train_dataset.samples_by_label.get(lab):
                 continue
-            arr = random.choice(samples)  # (T, 14, 2)
+
+            # NEW: use get_sample() to perform random crop on the fly
+            arr = train_dataset.get_sample(lab)  # (T, 14, 2)
+            
             xs.append(arr)
             ys.append(lab_idx)
             
         if not xs: continue
             
         coords = np.stack(xs, axis=0) # (B, T, 14, 2)
+        # 修正: MotionCLIPは (B, J, C, T) ではなく、 (B, T, J, C) か、
+        # あるいは Encoder内部で permute してるか確認が必要。
+        # MotionCLIPのDataset.__getitem__を見ると:
+        # ret = ret.permute(1, 2, 0).contiguous() -> (J, C, T) で返してる
+        # collate_fnで stack -> (B, J, C, T) になるはず。
+        
+        # なので、ここでは (B, J, C, T) に変換するのが正しい。
         coords = coords.transpose(0, 2, 3, 1) # (B, 14, 2, T) -> (B, J, C, T)
         
         x_batch = torch.from_numpy(coords).to(device)
@@ -663,9 +721,10 @@ def train_joint(
         torch.nn.utils.clip_grad_norm_(all_params, 0.5)
         optimizer.step()
         # Clamp logit_scale to keep temperature in a reasonable range.
+        # Temp = exp(-logit_scale). Range [0.01, 100] -> logit_scale [-4.6, 4.6]
+        # Default temp 0.07 is ~2.66. Previous clamp [log(0.1), log(10)] = [-2.3, 2.3] clipped it.
         with torch.no_grad():
-            # Narrower range [1/10, 10] to avoid extreme temperatures.
-            logit_scale.data.clamp_(np.log(1.0 / 10.0), np.log(10.0))
+            logit_scale.data.clamp_(np.log(1.0 / 100.0), np.log(1.0 / 0.01))
         
         loss_history.append(total_loss.item())
 
@@ -732,20 +791,20 @@ def train_joint(
             if test_acc > best_test_acc:
                 best_test_acc = test_acc
                 print(f"  >>> New Best Test Acc: {best_test_acc:.3f}! Saving model...")
-                torch.save(model.encoder.state_dict(), out_dir / "motionclip_encoder_joint_best.pth")
-                torch.save(sem_proj.state_dict(), out_dir / "sem_proj_joint_best.pth")
-                torch.save({"logit_scale": logit_scale.detach().cpu()}, out_dir / "logit_scale_joint_best.pt")
-                torch.save(model.state_dict(), out_dir / "motionclip_full_joint_best.pth")
+                torch.save(model.encoder.state_dict(), ckpt_dir / "motionclip_encoder_joint_best.pth")
+                torch.save(sem_proj.state_dict(), ckpt_dir / "sem_proj_joint_best.pth")
+                torch.save({"logit_scale": logit_scale.detach().cpu()}, ckpt_dir / "logit_scale_joint_best.pt")
+                torch.save(model.state_dict(), ckpt_dir / "motionclip_full_joint_best.pth")
 
         # Periodic Save (Backup)
         if step % 1000 == 0:
-             torch.save(model.state_dict(), out_dir / f"motionclip_full_step{step}.pth")
+             torch.save(model.state_dict(), ckpt_dir / f"motionclip_full_step{step}.pth")
 
     # Final Save
-    print(f"Saving final models to {out_dir}")
-    torch.save(model.encoder.state_dict(), out_dir / "motionclip_encoder_joint_final.pth")
-    torch.save(sem_proj.state_dict(), out_dir / "sem_proj_joint_final.pth")
-    torch.save(model.state_dict(), out_dir / "motionclip_full_joint_final.pth")
+    print(f"Saving final models to {ckpt_dir}")
+    torch.save(model.encoder.state_dict(), ckpt_dir / "motionclip_encoder_joint_final.pth")
+    torch.save(sem_proj.state_dict(), ckpt_dir / "sem_proj_joint_final.pth")
+    torch.save(model.state_dict(), ckpt_dir / "motionclip_full_joint_final.pth")
 
     # Save a compact latent snapshot for later visualization
     snapshot_path = out_dir / "latent_snapshot_final.npz"
@@ -816,6 +875,8 @@ def parse_args():
     parser.add_argument("--wandb-project", type=str, default="hoyo_motion", help="W&B project name")
     parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (user or team)")
     parser.add_argument("--wandb-group", type=str, default=None, help="W&B group name")
+    parser.add_argument("--run-name", type=str, default=None, help="Optional name for the run directory")
+    parser.add_argument("--use-aug", action="store_true", help="Enable data augmentation (flip, rotation) during training")
     return parser.parse_args()
 
 
@@ -833,13 +894,18 @@ def main():
         torch.backends.cudnn.benchmark = False
 
     hoyo_root = HOYO_ROOT
-    out_dir = hoyo_root / "joint_training_results"
+    if args.run_name:
+        out_dir = hoyo_root / "joint_training_results" / args.run_name
+    else:
+        out_dir = hoyo_root / "joint_training_results"
     out_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = out_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Set up logging: tee stdout/stderr to a timestamped log file
     # ------------------------------------------------------------------
-    log_path = out_dir / f"train_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    log_path = logs_dir / f"train_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     log_file = open(log_path, "w", buffering=1)
     sys.stdout = Tee(sys.stdout, log_file)
     sys.stderr = Tee(sys.stderr, log_file)
@@ -851,7 +917,13 @@ def main():
     target_len = 60
     
     # Load Data (fine-grained labels)
-    dataset = HoyoInstructionDataset(hoyo_root, INSTRUCTION_ONOMATOPEIA, target_len=target_len)
+    dataset = HoyoInstructionDataset(
+        hoyo_root, 
+        INSTRUCTION_ONOMATOPEIA, 
+        target_len=target_len, 
+        is_train=True, 
+        use_aug=args.use_aug
+    )
     
     # Split Data (80% Train, 20% Test)
     train_dataset, test_dataset = split_dataset(dataset, ratio=0.8)
@@ -868,8 +940,8 @@ def main():
     
     # Normalize TRAIN data and persist stats, then normalize TEST with the same stats
     stats_path = out_dir / "normalization_stats.json"
-    normalize_dataset(train_dataset, INSTRUCTION_ONOMATOPEIA, stats_path)
-    apply_normalization_from_stats(test_dataset, INSTRUCTION_ONOMATOPEIA, stats_path)
+    normalize_dataset(train_dataset, stats_path)
+    apply_normalization_from_stats(test_dataset, stats_path)
 
     # Optionally convert to coarse style groups
     if args.label_mode == "coarse":
