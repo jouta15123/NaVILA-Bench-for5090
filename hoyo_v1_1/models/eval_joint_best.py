@@ -54,10 +54,13 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    fig_dir = out_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
 
     stats_path = out_dir / "normalization_stats.json"
-    full_ckpt = out_dir / "motionclip_full_joint_best.pth"
-    sem_proj_ckpt = out_dir / "sem_proj_joint_best.pth"
+    full_ckpt = ckpt_dir / "motionclip_full_joint_best.pth"
+    sem_proj_ckpt = ckpt_dir / "sem_proj_joint_best.pth"
 
     if not full_ckpt.exists():
         raise FileNotFoundError(f"Best full model checkpoint not found: {full_ckpt}")
@@ -180,7 +183,7 @@ def main():
     plt.ylabel("True label")
     plt.title("Confusion Matrix (normalized)")
     plt.tight_layout()
-    cm_path = out_dir / "confusion_matrix.png"
+    cm_path = fig_dir / "confusion_matrix.png"
     plt.savefig(cm_path, dpi=200)
     print(f"Saved confusion matrix plot to {cm_path}")
     plt.close()
@@ -222,7 +225,7 @@ def main():
     plt.ylabel("PC2")
     plt.legend(bbox_to_anchor=(1.05, 1.0), loc="upper left", fontsize=8)
     plt.tight_layout()
-    pca_path = out_dir / "joint_space_pca.png"
+    pca_path = fig_dir / "joint_space_pca.png"
     plt.savefig(pca_path, dpi=200)
     print(f"Saved joint PCA plot to {pca_path}")
     plt.close()

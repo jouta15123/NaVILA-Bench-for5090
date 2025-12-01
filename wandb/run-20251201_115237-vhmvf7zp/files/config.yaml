@@ -1,0 +1,118 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        e:
+            v4kw6kha4kapcjf4t9vzdhyqu02zau17:
+                args:
+                    - --stage
+                    - full
+                    - --steps
+                    - "5000"
+                    - --batch-size
+                    - "32"
+                    - --lr
+                    - "5e-5"
+                    - --lr-encoder
+                    - "2e-5"
+                    - --lr-decoder
+                    - "2e-5"
+                    - --lambda-vae
+                    - "1.0"
+                    - --lambda-contrastive
+                    - "0.5"
+                    - --contrastive-mode
+                    - supcon
+                    - --sem-encoder
+                    - sarashina
+                    - --wandb
+                codePath: hoyo_v1_1/models/train_motionclip_joint.py
+                codePathLocal: hoyo_v1_1/models/train_motionclip_joint.py
+                cpu_count: 16
+                cpu_count_logical: 32
+                cudaVersion: "12.8"
+                disk:
+                    /:
+                        total: "1967317549056"
+                        used: "634907389952"
+                email: jouta15123@gmail.com
+                executable: /home/jouta/venvs/motionclip/bin/python
+                git:
+                    commit: 3dc8c479c440fc7853d190e1b82f86320798cdb1
+                    remote: git@github.com:jouta15123/NaVILA-Bench-for5090.git
+                gpu: NVIDIA GeForce RTX 5090
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 21760
+                      memoryTotal: "34190917632"
+                      name: NVIDIA GeForce RTX 5090
+                      uuid: GPU-23b2d92b-cbcd-c594-edf7-6131c8c31f37
+                host: jouta-FRONTIER
+                memory:
+                    total: "66995527680"
+                os: Linux-6.8.0-85-generic-x86_64-with-glibc2.35
+                program: /home/jouta/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py
+                python: CPython 3.11.14
+                root: /home/jouta/NaVILA-Bench
+                startedAt: "2025-12-01T02:52:37.901066Z"
+                writerId: v4kw6kha4kapcjf4t9vzdhyqu02zau17
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "3":
+                - 2
+                - 16
+                - 61
+            "4": 3.11.14
+            "5": 0.23.0
+            "6": 4.57.1
+            "12": 0.23.0
+            "13": linux-x86_64
+batch_size:
+    value: 32
+device:
+    value: cuda
+eval_interval:
+    value: 200
+label_mode:
+    value: fine
+lambda_contrastive:
+    value: 0.5
+lambda_vae:
+    value: 1
+log_interval:
+    value: 100
+lr:
+    value: 5e-05
+lr_decoder:
+    value: 2e-05
+lr_encoder:
+    value: 2e-05
+sem_encoder:
+    value: sarashina
+stage:
+    value: full
+steps:
+    value: 5000
+target_len:
+    value: 60
+temp:
+    value: 0.07
+vis_max_per_label:
+    value: 50

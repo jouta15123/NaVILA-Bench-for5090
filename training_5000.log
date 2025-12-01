@@ -1,0 +1,77 @@
+/home/jouta/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py:41: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, _name):
+/home/jouta/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py:41: FutureWarning: In the future `np.str` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, _name):
+[Logger] Writing training logs to: /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/logs/train_log_20251201_114550.txt
+Device: cuda
+Loaded HOYO samples (train=True):
+  通常: 32 samples
+  すたすた: 32 samples
+  せかせか: 22 samples
+  てくてく: 22 samples
+  どっしどっし: 32 samples
+  とぼとぼ: 22 samples
+  のしのし: 22 samples
+  のろのろ: 32 samples
+  ぶらぶら: 22 samples
+  よたよた: 22 samples
+  よろよろ: 32 samples
+Splitting dataset (Train: 80%, Test: 20%)...
+  通常: 25 train, 7 test
+  すたすた: 25 train, 7 test
+  せかせか: 17 train, 5 test
+  てくてく: 17 train, 5 test
+  どっしどっし: 25 train, 7 test
+  とぼとぼ: 17 train, 5 test
+  のしのし: 17 train, 5 test
+  のろのろ: 25 train, 7 test
+  ぶらぶら: 17 train, 5 test
+  よたよた: 17 train, 5 test
+  よろよろ: 25 train, 7 test
+Using Sarashina sentence embeddings for semantics.
+Semantic texts:
+  普通に歩いている。
+  すたすたと歩いている。
+  せかせかと歩いている。
+  てくてくと歩いている。
+  どっしどっしと歩いている。
+  とぼとぼと歩いている。
+  のしのしと歩いている。
+  のろのろと歩いている。
+  ぶらぶらと歩いている。
+  よたよたと歩いている。
+  よろよろと歩いている。
+Data Mean: [-0.01162218 -0.00459227], Std: [0.11779569 0.29633108]
+/home/jouta/venvs/motionclip/lib/python3.11/site-packages/torch/nn/modules/transformer.py:382: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.batch_first was not True(use batch_first for better inference performance)
+  warnings.warn(
+Loaded MotionCLIP (Full). Missing: 4, Unexpected: 0
+[Init] Loaded sem_proj from /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints/sem_proj_joint_best.pth
+[Init] Loaded logit_scale from /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints/logit_scale_joint_best.pt
+Start Joint Training for 5000 steps... (stage=full)
+  Config: batch_size=32, lr=1e-05, lr_encoder=1e-05, lr_decoder=1e-05, lambda_vae=1.0, lambda_contrastive=0.1, temp=0.07
+[Step 00001] loss_total=1.1480 (vae=1.0223, cont=1.2567), train_acc@1=0.125, B=32, temp=0.1000, sim(pos=5.873, neg=4.135, n_pos=416, n_neg=3616)
+[Step 00500] loss_total=0.2489 (vae=0.0959, cont=1.5303), train_acc@1=0.097, B=32, temp=0.1000, sim(pos=6.878, neg=5.039, n_pos=464, n_neg=3568)
+[Step 01000] loss_total=0.1794 (vae=0.0299, cont=1.4954), train_acc@1=0.157, B=32, temp=0.1000, sim(pos=7.232, neg=4.834, n_pos=400, n_neg=3632)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.070 | Acc@3: 0.164 | MPJPE: 0.2177
+  >>> New Best Test Acc: 0.070! Saving model...
+[Step 01500] loss_total=0.1579 (vae=0.0246, cont=1.3327), train_acc@1=0.237, B=32, temp=0.1000, sim(pos=7.077, neg=4.339, n_pos=400, n_neg=3632)
+[Step 02000] loss_total=0.1356 (vae=0.0240, cont=1.1154), train_acc@1=0.333, B=32, temp=0.1000, sim(pos=6.648, neg=3.477, n_pos=416, n_neg=3616)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.086 | Acc@3: 0.227 | MPJPE: 0.1788
+  >>> New Best Test Acc: 0.086! Saving model...
+[Step 02500] loss_total=0.1191 (vae=0.0228, cont=0.9632), train_acc@1=0.412, B=32, temp=0.1000, sim(pos=6.974, neg=3.249, n_pos=376, n_neg=3656)
+[Step 03000] loss_total=0.1111 (vae=0.0214, cont=0.8967), train_acc@1=0.435, B=32, temp=0.1000, sim(pos=6.291, neg=2.125, n_pos=424, n_neg=3608)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.156 | Acc@3: 0.273 | MPJPE: 0.1689
+  >>> New Best Test Acc: 0.156! Saving model...
+[Step 03500] loss_total=0.1037 (vae=0.0202, cont=0.8350), train_acc@1=0.471, B=32, temp=0.1000, sim(pos=6.469, neg=1.400, n_pos=352, n_neg=3680)
+[Step 04000] loss_total=0.0978 (vae=0.0191, cont=0.7871), train_acc@1=0.501, B=32, temp=0.1000, sim(pos=6.906, neg=1.039, n_pos=440, n_neg=3592)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.109 | Acc@3: 0.281 | MPJPE: 0.1574
+[Step 04500] loss_total=0.0928 (vae=0.0184, cont=0.7438), train_acc@1=0.525, B=32, temp=0.1000, sim(pos=6.608, neg=1.275, n_pos=424, n_neg=3608)
+[Step 05000] loss_total=0.0868 (vae=0.0174, cont=0.6941), train_acc@1=0.555, B=32, temp=0.1000, sim(pos=6.578, neg=0.685, n_pos=360, n_neg=3672)
+Evaluating on Test Set...
+  [TEST] Acc@1: 0.109 | Acc@3: 0.289 | MPJPE: 0.1655
+Saving final models to /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/checkpoints
+Saved latent snapshot with 292 points to /home/jouta/NaVILA-Bench/hoyo_v1_1/joint_training_results/latent_snapshot_final.npz

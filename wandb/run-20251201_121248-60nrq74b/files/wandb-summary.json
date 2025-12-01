@@ -1,0 +1,1 @@
+{"test/mpjpe":0.20631983131170273,"test/acc_top1":0.6875,"train/vae_loss":0.024170740991830825,"train/contrastive_loss":0.40954782620072366,"train/step":5000,"train/train_acc_top1":0.7284375,"_timestamp":1.7645589033864944e+09,"test/acc_top3":0.8984375,"_wandb":{"runtime":135},"_runtime":135.061884282,"train/total_loss":0.22894465394318103,"_step":5000}

@@ -115,6 +115,8 @@ def train_joint(
     stage: str = "freeze",
 ):
     os.makedirs(out_dir, exist_ok=True)
+    ckpt_dir = out_dir / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     
     # Projector for semantics -> motion latent space
     # MotionCLIP latent dim is 512 (default)
@@ -265,7 +267,7 @@ def train_joint(
         
         # Save best model (or just periodic)
         if step % 500 == 0:
-             torch.save(model.state_dict(), out_dir / f"motionclip_full_step{step}.pth")
+             torch.save(model.state_dict(), ckpt_dir / f"motionclip_full_step{step}.pth")
         
         if step % log_interval == 0 or step == 1:
             # Calculate Acc
@@ -277,10 +279,10 @@ def train_joint(
             print(f"[Step {step:04d}] Total: {total_loss.item():.4f} | VAE: {vae_loss.item():.4f} | Cont: {cont_loss.item():.4f} | Acc: {acc:.3f}")
             
     # Save artifacts
-    print(f"Saving models to {out_dir}")
-    torch.save(model.encoder.state_dict(), out_dir / "motionclip_encoder_joint.pth")
-    torch.save(sem_proj.state_dict(), out_dir / "sem_proj_joint.pth")
-    torch.save(model.state_dict(), out_dir / "motionclip_full_joint.pth")
+    print(f"Saving models to {ckpt_dir}")
+    torch.save(model.encoder.state_dict(), ckpt_dir / "motionclip_encoder_joint.pth")
+    torch.save(sem_proj.state_dict(), ckpt_dir / "sem_proj_joint.pth")
+    torch.save(model.state_dict(), ckpt_dir / "motionclip_full_joint.pth")
     
     return model, sem_proj
 

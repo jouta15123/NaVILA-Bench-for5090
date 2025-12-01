@@ -1,0 +1,53 @@
+_wandb:
+    value:
+        cli_version: 0.23.0
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "3":
+                - 16
+            "4": 3.11.14
+            "5": 0.23.0
+            "6": 4.57.1
+            "12": 0.23.0
+            "13": linux-x86_64
+batch_size:
+    value: 32
+device:
+    value: cuda
+eval_interval:
+    value: 200
+label_mode:
+    value: fine
+lambda_contrastive:
+    value: 0.5
+lambda_vae:
+    value: 1
+log_interval:
+    value: 100
+lr:
+    value: 5e-05
+lr_decoder:
+    value: 2e-05
+lr_encoder:
+    value: 2e-05
+sem_encoder:
+    value: sarashina
+stage:
+    value: full
+steps:
+    value: 5000
+target_len:
+    value: 60
+temp:
+    value: 0.07
+vis_max_per_label:
+    value: 50
