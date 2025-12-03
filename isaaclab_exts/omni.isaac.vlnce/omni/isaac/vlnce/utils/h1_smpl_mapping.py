@@ -127,3 +127,6 @@ def get_h1_body_pos_mapped_to_smpl(env: ManagerBasedRLEnv):
     
     return smpl_pos_rel
 
+
+
+

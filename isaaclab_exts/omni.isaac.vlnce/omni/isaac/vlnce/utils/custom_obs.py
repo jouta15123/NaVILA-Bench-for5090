@@ -19,3 +19,6 @@ def motion_latent(env: "ManagerBasedRLEnv") -> torch.Tensor:
         # Default zero latent (512 dim for MotionCLIP)
         return torch.zeros((env.num_envs, 512), device=env.device)
 
+
+
+

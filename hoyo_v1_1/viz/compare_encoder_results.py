@@ -1,0 +1,494 @@
+#!/usr/bin/env python3
+"""
+比較可視化スクリプト: SigLIP vs Sarashina × Fine vs Coarse
+
+複数の学習結果（latent_snapshot_final.npz）を読み込み、
+2x2 サブプロットで比較可視化を行う。
+
+使用例:
+    python compare_encoder_results.py --results-dir /path/to/joint_training_results
+    
+    python compare_encoder_results.py \
+        --snapshots sarashina_fine/latent_snapshot_final.npz \
+                    sarashina_coarse/latent_snapshot_final.npz \
+                    siglip_fine/latent_snapshot_final.npz \
+                    siglip_coarse/latent_snapshot_final.npz
+"""
+
+import argparse
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+from dataclasses import dataclass
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import japanize_matplotlib  # noqa: F401
+import seaborn as sns
+from sklearn.decomposition import PCA
+from sklearn.metrics import confusion_matrix, silhouette_score
+
+
+# ラベル定義
+FINE_LABELS = [
+    "通常", "すたすた", "せかせか", "てくてく", "どっしどっし",
+    "とぼとぼ", "のしのし", "のろのろ", "ぶらぶら", "よたよた", "よろよろ"
+]
+
+COARSE_GROUPS = {
+    "速い系": ["すたすた", "せかせか", "てくてく"],
+    "遅い系": ["通常", "とぼとぼ", "のろのろ"],  # 「通常」を「遅い系」として扱う（評価時）
+    "重い系": ["どっしどっし", "のしのし"],
+    "ふらふら系": ["ぶらぶら", "よたよた", "よろよろ"],
+}
+COARSE_LABELS = list(COARSE_GROUPS.keys())
+
+# Fine -> Coarse マッピング
+FINE_TO_COARSE_IDX = {}
+for i, fine in enumerate(FINE_LABELS):
+    for c_idx, coarse in enumerate(COARSE_LABELS):
+        if fine in COARSE_GROUPS[coarse]:
+            FINE_TO_COARSE_IDX[i] = c_idx
+            break
+
+# カラーマップ
+COARSE_COLORS = {
+    "速い系": "#1f77b4",      # blue
+    "遅い系": "#ff7f0e",      # orange
+    "重い系": "#d62728",      # red
+    "ふらふら系": "#2ca02c",  # green
+}
+
+FINE_COLORS = plt.cm.tab20(np.linspace(0, 1, len(FINE_LABELS)))
+
+
+@dataclass
+class SnapshotData:
+    """学習結果のスナップショットデータ"""
+    z_m: np.ndarray           # モーション潜在ベクトル (N, D)
+    labels_idx: np.ndarray    # ラベルインデックス (N,)
+    label_list: List[str]     # ラベル名リスト
+    z_s_cls: np.ndarray       # セマンティックプロトタイプ (K, D)
+    splits: Optional[np.ndarray] = None  # train/test 分割情報
+    name: str = ""            # 識別名（例: "sarashina_fine"）
+
+
+def normalize(x: np.ndarray) -> np.ndarray:
+    """L2正規化"""
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-8)
+
+
+def load_snapshot(path: Path, name: str = "") -> SnapshotData:
+    """スナップショットファイルを読み込む"""
+    data = np.load(path, allow_pickle=True)
+    
+    return SnapshotData(
+        z_m=data["z_m"],
+        labels_idx=data["labels_idx"],
+        label_list=[str(l) for l in data["label_list"]],
+        z_s_cls=data["z_s_cls"],
+        splits=data.get("splits", None),
+        name=name or path.parent.name,
+    )
+
+
+def detect_label_mode(snapshot: SnapshotData) -> str:
+    """Fine (11) か Coarse (4) かを判定"""
+    if len(snapshot.label_list) == len(COARSE_LABELS):
+        if all(a == b for a, b in zip(snapshot.label_list, COARSE_LABELS)):
+            return "coarse"
+    return "fine"
+
+
+def convert_to_coarse(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray]:
+    """Fine ラベルを Coarse に変換"""
+    mode = detect_label_mode(snapshot)
+    
+    if mode == "coarse":
+        return snapshot.labels_idx, snapshot.z_s_cls
+    
+    # Fine -> Coarse 変換
+    labels_coarse = np.array([FINE_TO_COARSE_IDX[i] for i in snapshot.labels_idx])
+    
+    # プロトタイプも変換（Fine の平均を取る）
+    z_s_coarse_list = []
+    for c_lab in COARSE_LABELS:
+        fine_indices = [i for i, f in enumerate(FINE_LABELS) if f in COARSE_GROUPS[c_lab]]
+        vecs = snapshot.z_s_cls[fine_indices]
+        z_s_coarse_list.append(np.mean(vecs, axis=0))
+    z_s_coarse = np.stack(z_s_coarse_list, axis=0)
+    
+    return labels_coarse, normalize(z_s_coarse)
+
+
+def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
+    """各種メトリクスを計算"""
+    mode = detect_label_mode(snapshot)
+    
+    if mode == "coarse":
+        labels_idx = snapshot.labels_idx
+        z_s_cls = normalize(snapshot.z_s_cls)
+        label_list = COARSE_LABELS
+    else:
+        labels_idx, z_s_cls = convert_to_coarse(snapshot)
+        label_list = COARSE_LABELS
+    
+    z_m = normalize(snapshot.z_m)
+    
+    # Cosine similarity で予測
+    sims = z_m @ z_s_cls.T
+    preds = sims.argmax(axis=1)
+    
+    # Accuracy
+    acc = (preds == labels_idx).mean()
+    
+    # Top-3 Accuracy
+    if sims.shape[1] >= 3:
+        top3 = np.argsort(sims, axis=1)[:, -3:]
+        acc_top3 = np.mean([labels_idx[i] in top3[i] for i in range(len(labels_idx))])
+    else:
+        acc_top3 = acc
+    
+    # Silhouette Score
+    try:
+        sil = silhouette_score(z_m, labels_idx)
+    except:
+        sil = 0.0
+    
+    return {
+        "accuracy": acc,
+        "accuracy_top3": acc_top3,
+        "silhouette": sil,
+        "n_samples": len(z_m),
+        "n_classes": len(label_list),
+    }
+
+
+def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
+    """1x2 PCA 比較プロット（Sarashina vs SigLIP）
+    
+    モーションサンプルを4クラス（Coarse）で色分けし、
+    11個のセマンティックプロトタイプ（★）を表示。
+    """
+    n_snapshots = min(len(snapshots), 2)
+    fig, axes = plt.subplots(1, n_snapshots, figsize=(7 * n_snapshots, 6))
+    
+    if n_snapshots == 1:
+        axes = [axes]
+    
+    titles = ["Sarashina", "SigLIP"]
+    
+    for idx, snapshot in enumerate(snapshots[:2]):
+        ax = axes[idx]
+        
+        # PCA 実行（モーションサンプルのみでfitして、プロトタイプはtransform）
+        z_m = normalize(snapshot.z_m)
+        z_s_cls = normalize(snapshot.z_s_cls)
+        
+        pca = PCA(n_components=2)
+        z_pca_samples = pca.fit_transform(z_m)
+        z_pca_protos = pca.transform(z_s_cls)
+        
+        pc1_var = pca.explained_variance_ratio_[0] * 100
+        pc2_var = pca.explained_variance_ratio_[1] * 100
+        
+        # Coarseラベルに変換して色分け
+        labels_coarse, _ = convert_to_coarse(snapshot)
+        
+        # サンプルをCoarseグループごとにプロット
+        plotted_labels = set()
+        for coarse_idx, coarse_name in enumerate(COARSE_LABELS):
+            mask = labels_coarse == coarse_idx
+            if mask.sum() == 0:
+                continue
+            c = COARSE_COLORS[coarse_name]
+            ax.scatter(z_pca_samples[mask, 0], z_pca_samples[mask, 1],
+                      c=c, label=coarse_name if coarse_name not in plotted_labels else None,
+                      s=20, alpha=0.6)
+            plotted_labels.add(coarse_name)
+        
+        # 11個のプロトタイプを★でプロット（Coarseグループの色で）
+        for i in range(len(z_pca_protos)):
+            coarse_idx = FINE_TO_COARSE_IDX.get(i, 0)
+            c = COARSE_COLORS[COARSE_LABELS[coarse_idx]]
+            ax.scatter(z_pca_protos[i, 0], z_pca_protos[i, 1],
+                      c=c, marker='*', s=250, edgecolors='black', linewidths=1, zorder=10)
+        
+        # メトリクス計算（11クラスと4クラス）
+        # 11クラス精度
+        sims_fine = z_m @ z_s_cls.T
+        preds_fine = sims_fine.argmax(axis=1)
+        acc_fine = (preds_fine == snapshot.labels_idx).mean()
+        
+        # 4クラス精度
+        metrics = compute_metrics(snapshot)
+        
+        ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)", fontsize=11)
+        ax.set_ylabel(f"PC2 ({pc2_var:.1f}%)", fontsize=11)
+        ax.set_title(f"{titles[idx]}\n11クラス: {acc_fine:.1%} / 4クラス: {metrics['accuracy']:.1%}", fontsize=12)
+        ax.grid(alpha=0.3)
+        ax.axhline(0, color='gray', linestyle='--', alpha=0.3)
+        ax.axvline(0, color='gray', linestyle='--', alpha=0.3)
+        ax.legend(loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    print(f"Saved PCA comparison to: {out_path}")
+
+
+def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
+    """2x2 Confusion Matrix 比較プロット
+    
+    上段: 11クラス（Fine）分類
+    下段: 4クラス（Coarse）分類
+    左列: Sarashina
+    右列: SigLIP
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(16, 14))
+    
+    # 最大2つのスナップショットを想定（Sarashina, SigLIP）
+    for col_idx, snapshot in enumerate(snapshots[:2]):
+        z_m = normalize(snapshot.z_m)
+        
+        # === 上段: 11クラス（Fine）混同行列 ===
+        ax_fine = axes[0, col_idx]
+        
+        # Fine評価: 元のラベルとプロトタイプをそのまま使用
+        z_s_fine = normalize(snapshot.z_s_cls)
+        sims_fine = z_m @ z_s_fine.T
+        preds_fine = sims_fine.argmax(axis=1)
+        labels_fine = snapshot.labels_idx
+        
+        # 11クラスの混同行列
+        cm_fine = confusion_matrix(labels_fine, preds_fine, normalize='true')
+        
+        # 11クラス用の短縮ラベル（表示用）
+        fine_labels_short = ['通常', 'すたすた', 'せかせか', 'てくてく', 'どっし',
+                            'とぼとぼ', 'のしのし', 'のろのろ', 'ぶらぶら', 'よたよた', 'よろよろ']
+        
+        sns.heatmap(cm_fine, annot=True, fmt='.2f', cmap='Blues',
+                   xticklabels=fine_labels_short, yticklabels=fine_labels_short, ax=ax_fine,
+                   annot_kws={'size': 7})
+        ax_fine.set_xlabel('Predicted', fontsize=10)
+        ax_fine.set_ylabel('True', fontsize=10)
+        ax_fine.tick_params(axis='both', labelsize=8)
+        
+        # 精度計算
+        acc_fine = (preds_fine == labels_fine).mean()
+        encoder_name = "Sarashina" if col_idx == 0 else "SigLIP"
+        ax_fine.set_title(f'{encoder_name} - 11クラス (Acc: {acc_fine:.1%})', fontsize=12)
+        
+        # === 下段: 4クラス（Coarse）混同行列 ===
+        ax_coarse = axes[1, col_idx]
+        
+        # Coarse変換
+        labels_coarse, z_s_coarse = convert_to_coarse(snapshot)
+        z_s_coarse = normalize(z_s_coarse)
+        sims_coarse = z_m @ z_s_coarse.T
+        preds_coarse = sims_coarse.argmax(axis=1)
+        
+        # 4クラスの混同行列
+        cm_coarse = confusion_matrix(labels_coarse, preds_coarse, normalize='true')
+        
+        sns.heatmap(cm_coarse, annot=True, fmt='.2f', cmap='Oranges',
+                   xticklabels=COARSE_LABELS, yticklabels=COARSE_LABELS, ax=ax_coarse,
+                   annot_kws={'size': 10})
+        ax_coarse.set_xlabel('Predicted', fontsize=10)
+        ax_coarse.set_ylabel('True', fontsize=10)
+        ax_coarse.tick_params(axis='both', labelsize=9)
+        
+        # 精度計算
+        acc_coarse = (preds_coarse == labels_coarse).mean()
+        ax_coarse.set_title(f'{encoder_name} - 4クラス (Acc: {acc_coarse:.1%})', fontsize=12)
+    
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved Confusion Matrix comparison to: {out_path}")
+
+
+def plot_metrics_comparison(snapshots: List[SnapshotData], out_path: Path):
+    """メトリクス比較バープロット"""
+    names = []
+    accs = []
+    sils = []
+    
+    for snapshot in snapshots:
+        metrics = compute_metrics(snapshot)
+        names.append(snapshot.name.replace("_", "\n"))
+        accs.append(metrics["accuracy"])
+        sils.append(metrics["silhouette"])
+    
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    
+    x = np.arange(len(names))
+    width = 0.6
+    
+    # Accuracy
+    bars1 = axes[0].bar(x, accs, width, color=['#1f77b4', '#1f77b4', '#ff7f0e', '#ff7f0e'])
+    axes[0].set_ylabel('Accuracy')
+    axes[0].set_title('Classification Accuracy (Coarse 4-class)')
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(names)
+    axes[0].set_ylim(0, 1)
+    axes[0].axhline(0.25, color='red', linestyle='--', alpha=0.5, label='Chance (25%)')
+    axes[0].legend()
+    
+    # バーの上に値を表示
+    for bar, val in zip(bars1, accs):
+        axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f'{val:.1%}', ha='center', va='bottom', fontsize=10)
+    
+    # Silhouette Score
+    bars2 = axes[1].bar(x, sils, width, color=['#1f77b4', '#1f77b4', '#ff7f0e', '#ff7f0e'])
+    axes[1].set_ylabel('Silhouette Score')
+    axes[1].set_title('Silhouette Score (Cluster Separation)')
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(names)
+    axes[1].set_ylim(-0.2, 0.5)
+    axes[1].axhline(0, color='gray', linestyle='--', alpha=0.5)
+    
+    for bar, val in zip(bars2, sils):
+        axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f'{val:.3f}', ha='center', va='bottom', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved metrics comparison to: {out_path}")
+
+
+def generate_summary_report(snapshots: List[SnapshotData], out_path: Path):
+    """サマリーレポートを生成"""
+    lines = []
+    lines.append("=" * 70)
+    lines.append("SigLIP vs Sarashina 比較実験サマリー")
+    lines.append("=" * 70)
+    lines.append("")
+    
+    # 各実験の結果
+    for snapshot in snapshots:
+        mode = detect_label_mode(snapshot)
+        metrics = compute_metrics(snapshot)
+        
+        lines.append(f"### {snapshot.name} ###")
+        lines.append("-" * 50)
+        lines.append(f"  Label Mode: {mode} ({len(snapshot.label_list)} classes)")
+        lines.append(f"  Samples: {metrics['n_samples']}")
+        lines.append(f"  Accuracy (Coarse 4-class): {metrics['accuracy']:.1%}")
+        lines.append(f"  Accuracy Top-3: {metrics['accuracy_top3']:.1%}")
+        lines.append(f"  Silhouette Score: {metrics['silhouette']:.4f}")
+        lines.append("")
+    
+    # 比較サマリー
+    lines.append("=" * 70)
+    lines.append("比較サマリー")
+    lines.append("=" * 70)
+    
+    # Sarashina vs SigLIP
+    sarashina_results = [s for s in snapshots if "sarashina" in s.name.lower()]
+    siglip_results = [s for s in snapshots if "siglip" in s.name.lower()]
+    
+    if sarashina_results and siglip_results:
+        sar_acc = np.mean([compute_metrics(s)["accuracy"] for s in sarashina_results])
+        sig_acc = np.mean([compute_metrics(s)["accuracy"] for s in siglip_results])
+        
+        lines.append(f"\nAverage Accuracy:")
+        lines.append(f"  Sarashina: {sar_acc:.1%}")
+        lines.append(f"  SigLIP:    {sig_acc:.1%}")
+        
+        if sar_acc > sig_acc:
+            lines.append(f"\n→ Sarashina が {(sar_acc - sig_acc)*100:.1f}pp 優位")
+        else:
+            lines.append(f"\n→ SigLIP が {(sig_acc - sar_acc)*100:.1f}pp 優位")
+    
+    # Fine vs Coarse
+    fine_results = [s for s in snapshots if "fine" in s.name.lower()]
+    coarse_results = [s for s in snapshots if "coarse" in s.name.lower()]
+    
+    if fine_results and coarse_results:
+        fine_acc = np.mean([compute_metrics(s)["accuracy"] for s in fine_results])
+        coarse_acc = np.mean([compute_metrics(s)["accuracy"] for s in coarse_results])
+        
+        lines.append(f"\nLabel Mode Comparison:")
+        lines.append(f"  Fine (11→4 mapped): {fine_acc:.1%}")
+        lines.append(f"  Coarse (4 direct):  {coarse_acc:.1%}")
+    
+    report = "\n".join(lines)
+    
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    
+    print("\n" + report)
+    print(f"\nSaved summary report to: {out_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Compare SigLIP vs Sarashina training results")
+    parser.add_argument("--results-dir", type=str, default=None,
+                       help="Base directory containing experiment subdirs (e.g., joint_training_results)")
+    parser.add_argument("--snapshots", type=str, nargs="+", default=None,
+                       help="List of snapshot file paths")
+    parser.add_argument("--out-dir", type=str, default=None,
+                       help="Output directory for visualizations")
+    args = parser.parse_args()
+    
+    # スナップショットファイルを収集
+    snapshots = []
+    
+    if args.snapshots:
+        for path in args.snapshots:
+            p = Path(path)
+            if p.exists():
+                snapshots.append(load_snapshot(p))
+    elif args.results_dir:
+        base_dir = Path(args.results_dir)
+        # 期待される順序で探索
+        expected_names = ["sarashina_fine", "sarashina_coarse", "siglip_fine", "siglip_coarse"]
+        for name in expected_names:
+            snapshot_path = base_dir / name / "latent_snapshot_final.npz"
+            if snapshot_path.exists():
+                snapshots.append(load_snapshot(snapshot_path, name))
+                print(f"Loaded: {snapshot_path}")
+            else:
+                print(f"Not found: {snapshot_path}")
+    else:
+        # デフォルトパス
+        base_dir = Path(__file__).resolve().parents[1] / "joint_training_results"
+        expected_names = ["sarashina_fine", "sarashina_coarse", "siglip_fine", "siglip_coarse"]
+        for name in expected_names:
+            snapshot_path = base_dir / name / "latent_snapshot_final.npz"
+            if snapshot_path.exists():
+                snapshots.append(load_snapshot(snapshot_path, name))
+                print(f"Loaded: {snapshot_path}")
+    
+    if not snapshots:
+        print("Error: No snapshot files found!")
+        print("Please run training first or specify --snapshots or --results-dir")
+        return
+    
+    print(f"\nLoaded {len(snapshots)} snapshots")
+    
+    # 出力ディレクトリ
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+    else:
+        out_dir = Path(__file__).resolve().parent / "outputs" / "encoder_comparison"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 可視化実行
+    print("\nGenerating visualizations...")
+    
+    plot_pca_comparison(snapshots, out_dir / "pca_comparison_2x2.png")
+    plot_confusion_comparison(snapshots, out_dir / "confusion_comparison_2x2.png")
+    plot_metrics_comparison(snapshots, out_dir / "metrics_comparison.png")
+    generate_summary_report(snapshots, out_dir / "summary_report.txt")
+    
+    print(f"\n=== Done! All outputs saved to: {out_dir} ===")
+
+
+if __name__ == "__main__":
+    main()
+
