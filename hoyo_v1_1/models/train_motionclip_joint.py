@@ -103,12 +103,12 @@ class Tee:
 # Coarse style groups for sanity-check experiments
 # ---------------------------------------------------------------------------
 # 速い系: すたすた / せかせか / てくてく
-# 遅い系: とぼとぼ / のろのろ   （※「通常」はスタイルなしとして除外）
+# 遅い系: 通常 / とぼとぼ / のろのろ
 # 重い系: どっしどっし / のしのし
 # ふらふら系: ぶらぶら / よたよた / よろよろ
 COARSE_GROUPS = {
     "速い系": ["すたすた", "せかせか", "てくてく"],
-    "遅い系": ["とぼとぼ", "のろのろ"],
+    "遅い系": ["通常", "とぼとぼ", "のろのろ"],
     "重い系": ["どっしどっし", "のしのし"],
     "ふらふら系": ["ぶらぶら", "よたよた", "よろよろ"],
 }
@@ -356,6 +356,7 @@ def dump_latent_snapshot(
     device: torch.device,
     out_path: Path,
     labels=None,
+    split_modes=("test",),
     max_per_label: int = 50,
 ):
     """
@@ -366,6 +367,7 @@ def dump_latent_snapshot(
     if labels is None:
         labels = INSTRUCTION_ONOMATOPEIA
     labels = list(labels)
+    label_to_idx = {lab: i for i, lab in enumerate(labels)}
     sem_emb = sem_emb.to(device)
 
     # Class prototypes in motion latent space
@@ -376,42 +378,69 @@ def dump_latent_snapshot(
     ys = []
     splits = []
 
-    def _gather_from_split(ds: HoyoInstructionDataset, split_name: str):
-        for lab_idx, lab in enumerate(labels):
-            # Just sample N random crops
-            samples_list = ds.samples_by_label.get(lab, [])
-            if not samples_list:
+    split_modes = tuple(split_modes) if split_modes else ("test",)
+
+    def _collect_from_dataset(ds: HoyoInstructionDataset, split_name: str):
+        if split_name not in split_modes:
+            return
+
+        original_is_train = ds.is_train
+        original_use_aug = getattr(ds, "use_aug", False)
+        ds.is_train = False
+        ds.use_aug = False
+
+        idx_to_label = {idx: lab for lab, idx in ds.label_to_id.items()}
+        per_label_counts = [0 for _ in labels]
+
+        collected = 0
+        for data_idx in range(len(ds)):
+            coords, label_id = ds[data_idx]
+            lab_name = idx_to_label.get(int(label_id))
+            if lab_name is None:
                 continue
-            
-            n_take = min(len(samples_list), max_per_label)
-            # Use get_sample() n_take times
-            for _ in range(n_take):
-                arr = ds.get_sample(lab) # (T, 14, 2)
-                
-                coords = arr[np.newaxis, ...].transpose(0, 2, 3, 1)
-                x = torch.from_numpy(coords).to(device)
+            if lab_name not in label_to_idx:
+                continue
 
-                B, _, _, Tcur = x.shape
-                mask = torch.ones((B, Tcur), dtype=torch.bool, device=device)
-                lengths = torch.full((B,), Tcur, dtype=torch.long, device=device)
+            lab_idx = label_to_idx[lab_name]
+            if per_label_counts[lab_idx] >= max_per_label:
+                continue
 
-                batch = {
-                    "x": x,
-                    "mask": mask,
-                    "lengths": lengths,
-                    "y": torch.zeros((B,), dtype=torch.long, device=device),
-                }
+            coords = coords[np.newaxis, ...].transpose(0, 2, 3, 1)
+            x = torch.from_numpy(coords).to(device)
 
-                out = model(batch)
-                z_m = out["mu"]
-                z_m = F.normalize(z_m, dim=-1).squeeze(0).detach().cpu().numpy()
+            B, _, _, Tcur = x.shape
+            mask = torch.ones((B, Tcur), dtype=torch.bool, device=device)
+            lengths = torch.full((B,), Tcur, dtype=torch.long, device=device)
 
-                zs.append(z_m)
-                ys.append(lab_idx)
-                splits.append(split_name)
+            batch = {
+                "x": x,
+                "mask": mask,
+                "lengths": lengths,
+                "y": torch.zeros((B,), dtype=torch.long, device=device),
+            }
 
-    _gather_from_split(train_dataset, "train")
-    _gather_from_split(test_dataset, "test")
+            out = model(batch)
+            z_m = out["mu"]
+            z_m = F.normalize(z_m, dim=-1).squeeze(0).detach().cpu().numpy()
+
+            zs.append(z_m)
+            ys.append(lab_idx)
+            splits.append(split_name)
+
+            per_label_counts[lab_idx] += 1
+            collected += 1
+
+            # Early exit if we already have the quota for every label
+            if all(count >= min(max_per_label, len(ds.samples_by_label.get(lbl, []))) for count, lbl in zip(per_label_counts, labels)):
+                break
+
+        ds.is_train = original_is_train
+        ds.use_aug = original_use_aug
+
+        print(f"  Collected {collected} samples from split='{split_name}'")
+
+    _collect_from_dataset(train_dataset, "train")
+    _collect_from_dataset(test_dataset, "test")
 
     if not zs:
         print("No samples available to dump latent snapshot.")
@@ -454,6 +483,7 @@ def train_joint(
     contrastive_mode: str = "supcon",
     labels=None,
     vis_max_per_label: int = 50,
+    snapshot_splits=("test",),
     wandb_run=None,
 ):
     os.makedirs(out_dir, exist_ok=True)
@@ -810,6 +840,7 @@ def train_joint(
         device=device,
         labels=labels,
         out_path=snapshot_path,
+        split_modes=snapshot_splits,
         max_per_label=vis_max_per_label,
     )
     
@@ -870,6 +901,12 @@ def parse_args():
     parser.add_argument("--wandb-group", type=str, default=None, help="W&B group name")
     parser.add_argument("--run-name", type=str, default=None, help="Optional name for the run directory")
     parser.add_argument("--use-aug", action="store_true", help="Enable data augmentation (flip, rotation) during training")
+    parser.add_argument(
+        "--snapshot-splits",
+        type=str,
+        default="test",
+        help="Comma-separated list of dataset splits to include when saving latent snapshots (e.g., 'test' or 'train,test').",
+    )
     return parser.parse_args()
 
 
@@ -996,6 +1033,9 @@ def main():
     
     try:
         # Train
+        snapshot_splits = tuple([s.strip() for s in args.snapshot_splits.split(",") if s.strip()])
+        if not snapshot_splits:
+            snapshot_splits = ("test",)
         train_joint(
             train_dataset=train_dataset,
             test_dataset=test_dataset,
@@ -1017,6 +1057,7 @@ def main():
             contrastive_mode=args.contrastive_mode,
             labels=labels_for_training,
             vis_max_per_label=args.vis_max_per_label,
+            snapshot_splits=snapshot_splits,
             wandb_run=wandb_run,
         )
     finally:

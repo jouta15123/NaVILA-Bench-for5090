@@ -38,19 +38,17 @@ FINE_LABELS = [
 
 COARSE_GROUPS = {
     "速い系": ["すたすた", "せかせか", "てくてく"],
-    "遅い系": ["通常", "とぼとぼ", "のろのろ"],  # 「通常」を「遅い系」として扱う（評価時）
+    "遅い系": ["通常", "とぼとぼ", "のろのろ"],  # 「通常」を「遅い系」として扱う
     "重い系": ["どっしどっし", "のしのし"],
     "ふらふら系": ["ぶらぶら", "よたよた", "よろよろ"],
 }
 COARSE_LABELS = list(COARSE_GROUPS.keys())
 
-# Fine -> Coarse マッピング
-FINE_TO_COARSE_IDX = {}
-for i, fine in enumerate(FINE_LABELS):
-    for c_idx, coarse in enumerate(COARSE_LABELS):
-        if fine in COARSE_GROUPS[coarse]:
-            FINE_TO_COARSE_IDX[i] = c_idx
-            break
+LABEL_TO_COARSE = {}
+for coarse_name, fine_list in COARSE_GROUPS.items():
+    LABEL_TO_COARSE[coarse_name] = coarse_name
+    for fine in fine_list:
+        LABEL_TO_COARSE[fine] = coarse_name
 
 # カラーマップ
 COARSE_COLORS = {
@@ -60,7 +58,7 @@ COARSE_COLORS = {
     "ふらふら系": "#2ca02c",  # green
 }
 
-FINE_COLORS = plt.cm.tab20(np.linspace(0, 1, len(FINE_LABELS)))
+FALLBACK_COLOR = "#7f7f7f"
 
 
 @dataclass
@@ -93,6 +91,29 @@ def load_snapshot(path: Path, name: str = "") -> SnapshotData:
     )
 
 
+def filter_snapshot_by_splits(snapshot: SnapshotData, allowed_splits: Tuple[str, ...]) -> SnapshotData:
+    """train/testなどの分割でフィルタリング"""
+    if snapshot.splits is None or not allowed_splits:
+        return snapshot
+
+    split_arr = np.asarray(snapshot.splits).astype(str)
+    mask = np.isin(split_arr, list(allowed_splits))
+    if not mask.any():
+        raise ValueError(f"Snapshot '{snapshot.name}' has no samples for splits {allowed_splits}")
+
+    suffix = "+".join(sorted(set(allowed_splits)))
+    new_name = snapshot.name if suffix in ("train+test", "test+train") else f"{snapshot.name} ({suffix})"
+
+    return SnapshotData(
+        z_m=snapshot.z_m[mask],
+        labels_idx=snapshot.labels_idx[mask],
+        label_list=snapshot.label_list,
+        z_s_cls=snapshot.z_s_cls,
+        splits=split_arr[mask],
+        name=new_name,
+    )
+
+
 def detect_label_mode(snapshot: SnapshotData) -> str:
     """Fine (11) か Coarse (4) かを判定"""
     if len(snapshot.label_list) == len(COARSE_LABELS):
@@ -102,38 +123,45 @@ def detect_label_mode(snapshot: SnapshotData) -> str:
 
 
 def convert_to_coarse(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray]:
-    """Fine ラベルを Coarse に変換"""
+    """Fine/Coarseを問わず、Coarse 4クラス基準へマッピング"""
     mode = detect_label_mode(snapshot)
     
+    # 各サンプルのラベル名をCoarse名へ写像
+    labels_coarse = []
+    for lbl_idx in snapshot.labels_idx:
+        label_name = snapshot.label_list[int(lbl_idx)]
+        coarse_name = LABEL_TO_COARSE.get(label_name)
+        if coarse_name is None:
+            raise ValueError(f"Label '{label_name}' is not assigned to any coarse group.")
+        coarse_idx = COARSE_LABELS.index(coarse_name)
+        labels_coarse.append(coarse_idx)
+    labels_coarse = np.asarray(labels_coarse, dtype=np.int64)
+    
+    # プロトタイプ生成（COARSE_LABELS順に整列）
+    vectors = []
     if mode == "coarse":
-        return snapshot.labels_idx, snapshot.z_s_cls
+        for c_name in COARSE_LABELS:
+            if c_name not in snapshot.label_list:
+                raise ValueError(f"Snapshot '{snapshot.name}' lacks prototype for coarse label '{c_name}'.")
+            idx = snapshot.label_list.index(c_name)
+            vectors.append(snapshot.z_s_cls[idx])
+    else:
+        for c_name in COARSE_LABELS:
+            fine_names = COARSE_GROUPS[c_name]
+            fine_indices = [snapshot.label_list.index(fn) for fn in fine_names if fn in snapshot.label_list]
+            if not fine_indices:
+                raise ValueError(f"No fine labels found for coarse group '{c_name}' in snapshot '{snapshot.name}'.")
+            vectors.append(np.mean(snapshot.z_s_cls[fine_indices], axis=0))
     
-    # Fine -> Coarse 変換
-    labels_coarse = np.array([FINE_TO_COARSE_IDX[i] for i in snapshot.labels_idx])
-    
-    # プロトタイプも変換（Fine の平均を取る）
-    z_s_coarse_list = []
-    for c_lab in COARSE_LABELS:
-        fine_indices = [i for i, f in enumerate(FINE_LABELS) if f in COARSE_GROUPS[c_lab]]
-        vecs = snapshot.z_s_cls[fine_indices]
-        z_s_coarse_list.append(np.mean(vecs, axis=0))
-    z_s_coarse = np.stack(z_s_coarse_list, axis=0)
-    
-    return labels_coarse, normalize(z_s_coarse)
+    z_s_coarse = normalize(np.stack(vectors, axis=0))
+    return labels_coarse, z_s_coarse
 
 
 def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
     """各種メトリクスを計算"""
-    mode = detect_label_mode(snapshot)
-    
-    if mode == "coarse":
-        labels_idx = snapshot.labels_idx
-        z_s_cls = normalize(snapshot.z_s_cls)
-        label_list = COARSE_LABELS
-    else:
-        labels_idx, z_s_cls = convert_to_coarse(snapshot)
-        label_list = COARSE_LABELS
-    
+    labels_idx, z_s_cls = convert_to_coarse(snapshot)
+    label_list = COARSE_LABELS
+
     z_m = normalize(snapshot.z_m)
     
     # Cosine similarity で予測
@@ -202,31 +230,47 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
             mask = labels_coarse == coarse_idx
             if mask.sum() == 0:
                 continue
-            c = COARSE_COLORS[coarse_name]
-            ax.scatter(z_pca_samples[mask, 0], z_pca_samples[mask, 1],
-                      c=c, label=coarse_name if coarse_name not in plotted_labels else None,
-                      s=20, alpha=0.6)
+            c = COARSE_COLORS.get(coarse_name, FALLBACK_COLOR)
+            ax.scatter(
+                z_pca_samples[mask, 0],
+                z_pca_samples[mask, 1],
+                c=c,
+                label=coarse_name if coarse_name not in plotted_labels else None,
+                s=20,
+                alpha=0.6,
+            )
             plotted_labels.add(coarse_name)
         
-        # 11個のプロトタイプを★でプロット（Coarseグループの色で）
+        # プロトタイプを★でプロット（Fine/Coarse問わず）
         for i in range(len(z_pca_protos)):
-            coarse_idx = FINE_TO_COARSE_IDX.get(i, 0)
-            c = COARSE_COLORS[COARSE_LABELS[coarse_idx]]
-            ax.scatter(z_pca_protos[i, 0], z_pca_protos[i, 1],
-                      c=c, marker='*', s=250, edgecolors='black', linewidths=1, zorder=10)
+            proto_label = snapshot.label_list[i]
+            coarse_name = LABEL_TO_COARSE.get(proto_label, proto_label)
+            color = COARSE_COLORS.get(coarse_name, FALLBACK_COLOR)
+            ax.scatter(
+                z_pca_protos[i, 0],
+                z_pca_protos[i, 1],
+                c=color,
+                marker="*",
+                s=250,
+                edgecolors="black",
+                linewidths=1,
+                zorder=10,
+            )
         
-        # メトリクス計算（11クラスと4クラス）
-        # 11クラス精度
+        # メトリクス計算（提供クラス数 / Coarse 4クラス）
         sims_fine = z_m @ z_s_cls.T
         preds_fine = sims_fine.argmax(axis=1)
         acc_fine = (preds_fine == snapshot.labels_idx).mean()
-        
-        # 4クラス精度
         metrics = compute_metrics(snapshot)
+        label_mode = detect_label_mode(snapshot)
+        fine_label_desc = f"{len(snapshot.label_list)}クラス"
         
         ax.set_xlabel(f"PC1 ({pc1_var:.1f}%)", fontsize=11)
         ax.set_ylabel(f"PC2 ({pc2_var:.1f}%)", fontsize=11)
-        ax.set_title(f"{titles[idx]}\n11クラス: {acc_fine:.1%} / 4クラス: {metrics['accuracy']:.1%}", fontsize=12)
+        ax.set_title(
+            f"{titles[idx]} ({label_mode})\n{fine_label_desc}: {acc_fine:.1%} / 4クラス: {metrics['accuracy']:.1%}",
+            fontsize=12,
+        )
         ax.grid(alpha=0.3)
         ax.axhline(0, color='gray', linestyle='--', alpha=0.3)
         ax.axvline(0, color='gray', linestyle='--', alpha=0.3)
@@ -260,17 +304,26 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
         sims_fine = z_m @ z_s_fine.T
         preds_fine = sims_fine.argmax(axis=1)
         labels_fine = snapshot.labels_idx
+        fine_label_count = len(snapshot.label_list)
+        cm_fine = confusion_matrix(
+            labels_fine,
+            preds_fine,
+            labels=np.arange(fine_label_count),
+            normalize="true",
+        )
+        cm_fine = np.nan_to_num(cm_fine)
+        fine_labels_short = [name[:4] for name in snapshot.label_list]
         
-        # 11クラスの混同行列
-        cm_fine = confusion_matrix(labels_fine, preds_fine, normalize='true')
-        
-        # 11クラス用の短縮ラベル（表示用）
-        fine_labels_short = ['通常', 'すたすた', 'せかせか', 'てくてく', 'どっし',
-                            'とぼとぼ', 'のしのし', 'のろのろ', 'ぶらぶら', 'よたよた', 'よろよろ']
-        
-        sns.heatmap(cm_fine, annot=True, fmt='.2f', cmap='Blues',
-                   xticklabels=fine_labels_short, yticklabels=fine_labels_short, ax=ax_fine,
-                   annot_kws={'size': 7})
+        sns.heatmap(
+            cm_fine,
+            annot=True,
+            fmt=".2f",
+            cmap="Blues",
+            xticklabels=fine_labels_short,
+            yticklabels=fine_labels_short,
+            ax=ax_fine,
+            annot_kws={"size": 7},
+        )
         ax_fine.set_xlabel('Predicted', fontsize=10)
         ax_fine.set_ylabel('True', fontsize=10)
         ax_fine.tick_params(axis='both', labelsize=8)
@@ -278,23 +331,35 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
         # 精度計算
         acc_fine = (preds_fine == labels_fine).mean()
         encoder_name = "Sarashina" if col_idx == 0 else "SigLIP"
-        ax_fine.set_title(f'{encoder_name} - 11クラス (Acc: {acc_fine:.1%})', fontsize=12)
+        ax_fine.set_title(f'{encoder_name} - {fine_label_count}クラス (Acc: {acc_fine:.1%})', fontsize=12)
         
         # === 下段: 4クラス（Coarse）混同行列 ===
         ax_coarse = axes[1, col_idx]
         
         # Coarse変換
         labels_coarse, z_s_coarse = convert_to_coarse(snapshot)
-        z_s_coarse = normalize(z_s_coarse)
         sims_coarse = z_m @ z_s_coarse.T
         preds_coarse = sims_coarse.argmax(axis=1)
         
         # 4クラスの混同行列
-        cm_coarse = confusion_matrix(labels_coarse, preds_coarse, normalize='true')
+        cm_coarse = confusion_matrix(
+            labels_coarse,
+            preds_coarse,
+            labels=np.arange(len(COARSE_LABELS)),
+            normalize="true",
+        )
+        cm_coarse = np.nan_to_num(cm_coarse)
         
-        sns.heatmap(cm_coarse, annot=True, fmt='.2f', cmap='Oranges',
-                   xticklabels=COARSE_LABELS, yticklabels=COARSE_LABELS, ax=ax_coarse,
-                   annot_kws={'size': 10})
+        sns.heatmap(
+            cm_coarse,
+            annot=True,
+            fmt='.2f',
+            cmap='Oranges',
+            xticklabels=COARSE_LABELS,
+            yticklabels=COARSE_LABELS,
+            ax=ax_coarse,
+            annot_kws={'size': 10},
+        )
         ax_coarse.set_xlabel('Predicted', fontsize=10)
         ax_coarse.set_ylabel('True', fontsize=10)
         ax_coarse.tick_params(axis='both', labelsize=9)
@@ -325,9 +390,10 @@ def plot_metrics_comparison(snapshots: List[SnapshotData], out_path: Path):
     
     x = np.arange(len(names))
     width = 0.6
+    colors = ['#1f77b4' if 'sarashina' in s.name.lower() else '#ff7f0e' for s in snapshots]
     
     # Accuracy
-    bars1 = axes[0].bar(x, accs, width, color=['#1f77b4', '#1f77b4', '#ff7f0e', '#ff7f0e'])
+    bars1 = axes[0].bar(x, accs, width, color=colors)
     axes[0].set_ylabel('Accuracy')
     axes[0].set_title('Classification Accuracy (Coarse 4-class)')
     axes[0].set_xticks(x)
@@ -342,7 +408,7 @@ def plot_metrics_comparison(snapshots: List[SnapshotData], out_path: Path):
                     f'{val:.1%}', ha='center', va='bottom', fontsize=10)
     
     # Silhouette Score
-    bars2 = axes[1].bar(x, sils, width, color=['#1f77b4', '#1f77b4', '#ff7f0e', '#ff7f0e'])
+    bars2 = axes[1].bar(x, sils, width, color=colors)
     axes[1].set_ylabel('Silhouette Score')
     axes[1].set_title('Silhouette Score (Cluster Separation)')
     axes[1].set_xticks(x)
@@ -372,9 +438,14 @@ def generate_summary_report(snapshots: List[SnapshotData], out_path: Path):
     for snapshot in snapshots:
         mode = detect_label_mode(snapshot)
         metrics = compute_metrics(snapshot)
+        split_summary = "N/A"
+        if snapshot.splits is not None:
+            unique_splits = sorted(set(np.asarray(snapshot.splits).astype(str)))
+            split_summary = ", ".join(unique_splits)
         
         lines.append(f"### {snapshot.name} ###")
         lines.append("-" * 50)
+        lines.append(f"  Split(s): {split_summary}")
         lines.append(f"  Label Mode: {mode} ({len(snapshot.label_list)} classes)")
         lines.append(f"  Samples: {metrics['n_samples']}")
         lines.append(f"  Accuracy (Coarse 4-class): {metrics['accuracy']:.1%}")
@@ -433,6 +504,8 @@ def main():
                        help="List of snapshot file paths")
     parser.add_argument("--out-dir", type=str, default=None,
                        help="Output directory for visualizations")
+    parser.add_argument("--split-mode", choices=["test", "train", "both"], default="test",
+                        help="Which split(s) to visualize (default: test)")
     args = parser.parse_args()
     
     # スナップショットファイルを収集
@@ -468,7 +541,15 @@ def main():
         print("Error: No snapshot files found!")
         print("Please run training first or specify --snapshots or --results-dir")
         return
-    
+    split_options = {
+        "test": ("test",),
+        "train": ("train",),
+        "both": (),
+    }
+    allowed_splits = split_options[args.split_mode]
+    if allowed_splits:
+        snapshots = [filter_snapshot_by_splits(s, allowed_splits) for s in snapshots]
+
     print(f"\nLoaded {len(snapshots)} snapshots")
     
     # 出力ディレクトリ
@@ -491,4 +572,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
