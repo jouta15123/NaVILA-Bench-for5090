@@ -6,6 +6,7 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 from sentence_transformers import SentenceTransformer
 
 
@@ -24,14 +25,14 @@ INSTRUCTION_ONOMATOPEIA = [
 ]
 
 
-class HoyoInstructionDataset:
+class HoyoInstructionDataset(Dataset):
     """
     HOYO の JSON + pickle から instruction 11語だけを集めるデータセット。
     
     MotionCLIP 用の前処理:
       1. 身長正規化 (Scale Normalization) -> ロード時に適用
-      2. Window Slicing (Crop) -> get_sample時に適用
-      3. 重心除去 (Centering) -> get_sample時に適用
+      2. Window Slicing (Crop) -> __getitem__時に適用
+      3. 重心除去 (Centering) -> __getitem__時に適用
       4. 標準化 (Standardization) -> apply_normalization_from_stats で適用
     """
 
@@ -44,6 +45,16 @@ class HoyoInstructionDataset:
 
         # ラベルごとの生データリスト（長さは可変、身長正規化済み）
         self.samples_by_label: Dict[str, List[np.ndarray]] = {lab: [] for lab in target_labels}
+
+        # インデックスアクセスのためのリスト: [(label, index_in_label_list), ...]
+        self._indices: List[Tuple[str, int]] = []
+        
+        # ラベル文字列からIDへのマッピング（評価・学習用）
+        self.label_to_id = {lab: i for i, lab in enumerate(INSTRUCTION_ONOMATOPEIA)}
+        
+        # 正規化用統計量 (normalize_dataset でセットされる)
+        self.mean = None
+        self.std = None
 
         data_dir = root / "data"
         if not data_dir.exists():
@@ -63,11 +74,34 @@ class HoyoInstructionDataset:
             
             # ロードして身長だけ正規化（長さはそのまま）
             coords = self._load_raw_and_scale(pkl_path)
+            
+            # リストに追加し、インデックスを記録
+            current_idx = len(self.samples_by_label[inst])
             self.samples_by_label[inst].append(coords)
+            self._indices.append((inst, current_idx))
 
         print(f"Loaded HOYO samples (train={self.is_train}):")
         for lab in target_labels:
             print(f"  {lab}: {len(self.samples_by_label[lab])} samples")
+
+    def __len__(self):
+        return len(self._indices)
+
+    def __getitem__(self, idx: int):
+        """
+        インデックス指定でサンプルを取得する。
+        is_train=Trueの場合はランダムクロップとAugmentationが適用される。
+        is_train=Falseの場合はセンタークロップ。
+        """
+        label, raw_idx = self._indices[idx]
+        raw_seq = self.samples_by_label[label][raw_idx]
+        
+        coords = self._process_sample(raw_seq)
+        label_id = self.label_to_id.get(label, -1)
+        
+        # 戻り値: (T, 14, 2), label_id
+        # 必要に応じてTensorに変換してもよいが、ここではnumpyのまま返し、DataLoaderのcollate_fnでTensor化する
+        return coords, label_id
 
     def _load_raw_and_scale(self, pkl_path: Path) -> np.ndarray:
         """
@@ -117,17 +151,10 @@ class HoyoInstructionDataset:
         arr_scaled = arr_rooted / scale
         return arr_scaled
 
-    def get_sample(self, label: str) -> np.ndarray:
+    def _process_sample(self, raw_seq: np.ndarray) -> np.ndarray:
         """
-        指定ラベルの中からランダムに1つ選び、60フレームをクロップして返す。
-        is_train=Trueならランダムクロップ＋Data Augmentation、Falseならセンタークロップ。
+        生シーケンス（可変長）を受け取り、クロップ、Augmentation、初期フレーム重心除去を行う。
         """
-        samples = self.samples_by_label.get(label, [])
-        if not samples:
-            raise ValueError(f"No samples for label {label}")
-        
-        # ランダムにシーケンスを選ぶ
-        raw_seq = random.choice(samples) # (T, 14, 2)
         T = raw_seq.shape[0]
         tgt = self.target_len
 
@@ -149,8 +176,6 @@ class HoyoInstructionDataset:
         # ここで行うのは「スタイルの本質（速度感、リズム）」を壊さないものに限る
         if self.is_train and self.use_aug:
             # A. Random Horizontal Flip (左右反転)
-            # x軸を反転させる (x -> -x)
-            # ただし、左右の関節（右肩<->左肩など）の入れ替えも必要
             if random.random() < 0.5:
                 cropped = cropped.copy()
                 # x座標反転 (arr_swappedで[x,y]になっている前提)
@@ -161,14 +186,11 @@ class HoyoInstructionDataset:
                 # Swap pairs: (2,5), (3,6), (4,7), (8,11), (9,12), (10,13)
                 pairs = [(2,5), (3,6), (4,7), (8,11), (9,12), (10,13)]
                 for r, l in pairs:
-                    # swap
                     tmp = cropped[:, r, :].copy()
                     cropped[:, r, :] = cropped[:, l, :]
                     cropped[:, l, :] = tmp
 
             # B. Random Rotation (わずかな回転)
-            # 進行方向が変わるだけなので、スタイルの本質は変わらないはず
-            # -15度〜+15度
             if random.random() < 0.5:
                 angle_deg = random.uniform(-15, 15)
                 angle_rad = np.deg2rad(angle_deg)
@@ -181,11 +203,28 @@ class HoyoInstructionDataset:
         # 5. 重心除去 (Local Centering)
         # クロップされた区間の「最初のフレーム」の重心を引いて、
         # その区間内での移動（速度・軌跡）を保存する。
-        # 元の実装（各フレームごとの重心除去）だと、移動情報が消えて足踏みになってしまう。
         com = cropped[0].mean(axis=0) # (2,)
         centered = cropped - com      # (T, J, C) - (2,) -> Broadcast
         
+        # 6. 標準化 (Standardization) - On-the-fly
+        if hasattr(self, "mean") and self.mean is not None and \
+           hasattr(self, "std") and self.std is not None:
+            centered = (centered - self.mean) / self.std
+
         return centered.astype(np.float32)
+
+    def get_sample(self, label: str) -> np.ndarray:
+        """
+        指定ラベルの中からランダムに1つ選び、60フレームをクロップして返す。
+        (後方互換性用)
+        """
+        samples = self.samples_by_label.get(label, [])
+        if not samples:
+            raise ValueError(f"No samples for label {label}")
+        
+        # ランダムにシーケンスを選ぶ
+        raw_seq = random.choice(samples) # (T, 14, 2)
+        return self._process_sample(raw_seq)
 
     def get_all_samples_flat(self) -> List[np.ndarray]:
         """全データをフラットなリストで返す（統計計算用など）"""
@@ -246,33 +285,12 @@ def _compute_stats(dataset: HoyoInstructionDataset) -> Tuple[np.ndarray, np.ndar
 
     all_processed_samples = []
     
-    # 全ラベルの全サンプルについて get_sample() を実行
-    # get_sample() 内で「クロップ -> 初期フレーム重心除去」が行われる
-    for lab, raw_samples in dataset.samples_by_label.items():
-        # get_sample はランダム選択だが、is_train=False ならセンタークロップ固定。
-        # ただし、同じラベルに複数サンプルある場合、get_sample(lab) はその中からランダムに1つ選ぶ。
-        # 全サンプルを確実になめるには、dataset内部の実装に頼らずここでループする方が安全だが、
-        # get_sample のロジック（クロップ＆重心除去）を再利用したい。
-        # -> get_sample ロジックを切り出すのがベストだが、ここでは簡易的に
-        #    raw_samples を直接処理する形にする（get_sample のロジックを模倣）。
-        
-        tgt = dataset.target_len
-        
-        for raw_seq in raw_samples:
-            T = raw_seq.shape[0]
-            # Center Crop (is_train=False equivalent)
-            if T > tgt:
-                start = (T - tgt) // 2
-                cropped = raw_seq[start : start + tgt]
-            else:
-                pad_len = tgt - T
-                cropped = np.pad(raw_seq, ((0, pad_len), (0, 0), (0, 0)), mode="edge")
-            
-            # 初期フレーム重心除去 (get_sample と同じロジック)
-            com0 = cropped[0].mean(axis=0)
-            centered = cropped - com0
-            
-            all_processed_samples.append(centered)
+    # Datasetの機能を使って全サンプルをイテレート
+    # _indices を使えば全サンプルを確実になめられる
+    for idx in range(len(dataset)):
+        # __getitem__ が _process_sample を呼び、クロップと重心除去を行う
+        centered, _ = dataset[idx]
+        all_processed_samples.append(centered)
 
     # 状態を復元
     dataset.is_train = original_is_train
@@ -289,21 +307,19 @@ def _compute_stats(dataset: HoyoInstructionDataset) -> Tuple[np.ndarray, np.ndar
 
 
 def _apply_stats(dataset: HoyoInstructionDataset, mean: np.ndarray, std: np.ndarray) -> None:
-    # メモリ上の全データを書き換える（標準化）
-    for lab, samples in dataset.samples_by_label.items():
-        new_samples = []
-        for arr in samples:
-            # arr: (T, 14, 2)
-            # ブロードキャスト: (2,) -> (T, 14, 2)
-            norm_arr = (arr - mean) / std
-            new_samples.append(norm_arr.astype(np.float32))
-        dataset.samples_by_label[lab] = new_samples
+    # データを書き換えずに、Dataset側に統計量を保持させてOn-the-flyで正規化する
+    dataset.mean = mean
+    dataset.std = std
 
 
 def normalize_dataset(dataset: HoyoInstructionDataset, stats_path: Path):
     """
     データセット全体の平均・分散を計算し、適用して保存する。
     """
+    # 統計計算時は正規化を無効化しておく
+    dataset.mean = None
+    dataset.std = None
+
     data_mean, data_std = _compute_stats(dataset)
     print(f"Data Mean: {data_mean}, Std: {data_std}")
     _apply_stats(dataset, data_mean, data_std)

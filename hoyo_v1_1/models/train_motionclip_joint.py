@@ -58,11 +58,11 @@ if str(MOTIONCLIP_ROOT) not in sys.path:
     sys.path.insert(0, str(MOTIONCLIP_ROOT))
 
 from src.models.get_model import get_model as motionclip_get_model
-from src.models.tools.losses import get_loss_function
 
 # Add project root so local package imports work when executed directly
 sys.path.append(str(REPO_ROOT))
 
+    
 from hoyo_v1_1.models.common import (
     HoyoInstructionDataset,
     encode_semantics_sarashina,
@@ -71,7 +71,7 @@ from hoyo_v1_1.models.common import (
     normalize_dataset,
     apply_normalization_from_stats,
 )
-
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 class Tee:
     """
@@ -142,28 +142,24 @@ def load_motionclip_full_model(device: torch.device, target_len: int = 60):
     params["lambdas"] = {"rc": 1.0, "vel": 1.0} 
     params["clip_lambdas"] = {} # Disable CLIP losses
     
-    cwd = os.getcwd()
-    os.chdir(str(MOTIONCLIP_ROOT))
-    try:
-        # Initialize model with random weights first
-        model = motionclip_get_model(params, clip_model=None)
-        
-        # Load pretrained weights where possible
-        state_dict = torch.load(ckpt_path, map_location=device)
-        
-        # Filter out incompatible layers
-        # encoder.skelEmbedding: input projection
-        # decoder.finallayer: output projection
-        filtered = {
-            k: v for k, v in state_dict.items()
-            if not (k.startswith("encoder.skelEmbedding.") or k.startswith("decoder.finallayer."))
-        }
-        
-        missing, unexpected = model.load_state_dict(filtered, strict=False)
-        print(f"Loaded MotionCLIP (Full). Missing: {len(missing)}, Unexpected: {len(unexpected)}")
-        
-    finally:
-        os.chdir(cwd)
+    # Initialize model with random weights first
+    # os.chdir is removed as sys.path should handle imports correctly
+    # and we want to avoid side effects on CWD.
+    model = motionclip_get_model(params, clip_model=None)
+    
+    # Load pretrained weights where possible
+    state_dict = torch.load(ckpt_path, map_location=device)
+    
+    # Filter out incompatible layers
+    # encoder.skelEmbedding: input projection
+    # decoder.finallayer: output projection
+    filtered = {
+        k: v for k, v in state_dict.items()
+        if not (k.startswith("encoder.skelEmbedding.") or k.startswith("decoder.finallayer."))
+    }
+    
+    missing, unexpected = model.load_state_dict(filtered, strict=False)
+    print(f"Loaded MotionCLIP (Full). Missing: {len(missing)}, Unexpected: {len(unexpected)}")
         
     return model, params
 
@@ -179,9 +175,10 @@ def split_dataset(dataset: HoyoInstructionDataset, ratio: float = 0.8):
     train_ds = copy.copy(dataset)
     test_ds = copy.copy(dataset)
     
-    # IMPORTANT: Set crop mode
+    # IMPORTANT: Set crop mode and disable augmentation for test
     train_ds.is_train = True
     test_ds.is_train = False
+    test_ds.use_aug = False  # テストでは augmentation を明示的にオフ
     
     train_ds.samples_by_label = {}
     test_ds.samples_by_label = {}
@@ -211,6 +208,14 @@ def split_dataset(dataset: HoyoInstructionDataset, ratio: float = 0.8):
         test_ds.samples_by_label[lab] = test_samples
         
         print(f"  {lab}: {len(train_samples)} train, {len(test_samples)} test")
+
+    # Rebuild indices for DataLoader support
+    for ds in [train_ds, test_ds]:
+        ds._indices = []
+        # ds.label_to_id is inherited/copied, assuming labels didn't change
+        for lab, samples in ds.samples_by_label.items():
+            for idx in range(len(samples)):
+                ds._indices.append((lab, idx))
         
     return train_ds, test_ds
 
@@ -235,6 +240,14 @@ def build_coarse_dataset(dataset: HoyoInstructionDataset) -> HoyoInstructionData
     for lab in COARSE_LABELS:
         print(f"  {lab}: {len(coarse_ds.samples_by_label[lab])} samples")
 
+    # Rebuild indices and label map for DataLoader support
+    coarse_ds._indices = []
+    coarse_ds.label_to_id = {lab: i for i, lab in enumerate(COARSE_LABELS)}
+    for lab in COARSE_LABELS:
+        samples = coarse_ds.samples_by_label[lab]
+        for idx in range(len(samples)):
+            coarse_ds._indices.append((lab, idx))
+
     return coarse_ds
 
 @torch.no_grad()
@@ -247,7 +260,14 @@ def evaluate_dataset(
     labels=None,
     batch_size: int = 64,
 ):
+    """
+    Evaluate the model on a dataset.
+    
+    IMPORTANT: Computes accuracy by counting correct predictions over all samples,
+    NOT by averaging per-batch accuracies (which would be biased when batch sizes vary).
+    """
     model.eval()
+    sem_proj.eval()
 
     if labels is None:
         labels = INSTRUCTION_ONOMATOPEIA
@@ -257,64 +277,25 @@ def evaluate_dataset(
     z_s_cls = sem_proj(sem_emb) 
     z_s_cls = F.normalize(z_s_cls, dim=-1)
     
-    total_acc_1 = 0.0
-    total_acc_3 = 0.0
+    # FIX: Count correct predictions instead of averaging batch accuracies
+    total_correct_1 = 0
+    total_correct_3 = 0
     total_mpjpe = 0.0
-    valid_batches = 0
+    total_samples = 0
     
-    # Collect fixed crop samples for evaluation
-    all_samples = []
-    # Evaluate every sequence in the test set (using fixed center crop)
-    for i, lab in enumerate(labels):
-        raw_samples = dataset.samples_by_label.get(lab, [])
-        for _ in raw_samples:
-            # get_sample() will perform center crop because dataset.is_train should be False
-            # Note: Since get_sample picks a random sample from the list, we cannot easily iterate
-            # all samples deterministically if we use get_sample().
-            # However, get_sample() implementation in dataset picks randomly.
-            # To evaluate ALL samples exactly once, we need a slight workaround or trust randomness/repeat.
-            
-            # WORKAROUND: Iterate raw list and manually process OR 
-            # just rely on random sampling for 'len(samples)' times.
-            # Since get_sample picks random from list, we might miss some and duplicate others.
-            # For strict evaluation, we should manually crop all samples.
-            pass
-        
-        # Manual deterministic iteration
-        tgt = dataset.target_len
-        for raw_seq in raw_samples:
-            T = raw_seq.shape[0]
-            if T > tgt:
-                start = (T - tgt) // 2
-                cropped = raw_seq[start : start + tgt]
-            else:
-                pad_len = tgt - T
-                cropped = np.pad(raw_seq, ((0, pad_len), (0, 0), (0, 0)), mode="edge")
-            
-            # 修正: 評価時も学習時と同じく「最初のフレームの重心」だけ引く（移動を残す）
-            # Local Centering (First frame relative)
-            com0 = cropped[0].mean(axis=0, keepdims=True)  # (1, 2)
-            centered = cropped - com0
-            
-            all_samples.append((centered.astype(np.float32), i))
-    
-    if not all_samples:
-        return {"acc@1": 0.0, "acc@3": 0.0, "mpjpe": 0.0}
+    # Use DataLoader for memory efficiency
+    # dataset[i] returns (coords, label_id)
+    # Shuffle=False for deterministic evaluation order
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    # Deterministic order for stable evaluation
-    # (dataset itself is already random-ish;ここではシャッフルしない)
-    for b_idx in range(0, len(all_samples), batch_size):
-        batch_items = all_samples[b_idx : b_idx + batch_size]
-        if not batch_items: break
+    for x_batch, y_batch in dataloader:
+        # x_batch: (B, T, 14, 2)
+        # y_batch: (B,)
         
-        xs = [item[0] for item in batch_items]
-        ys = [item[1] for item in batch_items]
-        
-        coords = np.stack(xs, axis=0)
-        coords = coords.transpose(0, 2, 3, 1)
-        
-        x_batch = torch.from_numpy(coords).to(device)
-        y_batch = torch.tensor(ys, dtype=torch.long, device=device)
+        # Transpose to (B, J, C, T) for MotionCLIP
+        # (B, T, 14, 2) -> (B, 14, 2, T)
+        x_batch = x_batch.permute(0, 2, 3, 1).to(device)
+        y_batch = y_batch.to(device)
         
         B, _, _, Tcur = x_batch.shape
         mask = torch.ones((B, Tcur), dtype=torch.bool, device=device)
@@ -334,34 +315,34 @@ def evaluate_dataset(
         logits = z_m @ z_s_cls.t()
         
         preds = logits.argmax(dim=1)
-        acc1 = (preds == y_batch).float().mean().item()
+        # FIX: Count correct predictions instead of computing batch accuracy
+        total_correct_1 += (preds == y_batch).sum().item()
         
         if logits.shape[1] >= 3:
             _, top3 = logits.topk(3, dim=1)
             correct3 = top3.eq(y_batch.unsqueeze(1)).any(dim=1)
-            acc3 = correct3.float().mean().item()
+            total_correct_3 += correct3.sum().item()
         else:
-            acc3 = acc1
+            total_correct_3 += (preds == y_batch).sum().item()
             
         rec = out.get("output", out.get("rec", None))
         if rec is not None:
             diff = rec - x_batch
-            mpjpe = torch.norm(diff, dim=2).mean().item()
+            # MPJPE is averaged over frames/joints, then summed over samples
+            mpjpe = torch.norm(diff, dim=2).mean(dim=(1, 2)).sum().item()
         else:
             mpjpe = 0.0
             
-        total_acc_1 += acc1
-        total_acc_3 += acc3
         total_mpjpe += mpjpe
-        valid_batches += 1
+        total_samples += B
         
-    if valid_batches == 0:
+    if total_samples == 0:
         return {"acc@1": 0.0, "acc@3": 0.0, "mpjpe": 0.0}
         
     return {
-        "acc@1": total_acc_1 / valid_batches,
-        "acc@3": total_acc_3 / valid_batches,
-        "mpjpe": total_mpjpe / valid_batches,
+        "acc@1": total_correct_1 / total_samples,
+        "acc@3": total_correct_3 / total_samples,
+        "mpjpe": total_mpjpe / total_samples,
     }
 
 
@@ -487,26 +468,45 @@ def train_joint(
     sem_proj = nn.Linear(d_sem, d_motion, bias=False).to(device)
     logit_scale = nn.Parameter(torch.ones([]) * np.log(1.0 / temp))
 
-    # Optionally initialize from previous stage checkpoints (e.g., freeze -> encoder)
+    # Optionally initialize from previous stage checkpoints (e.g., freeze -> encoder -> full)
     sem_proj_ckpt = ckpt_dir / "sem_proj_joint_best.pth"
     logit_scale_ckpt = ckpt_dir / "logit_scale_joint_best.pt"
-    if stage in ("encoder", "full") and sem_proj_ckpt.exists():
-        try:
-            sem_state = torch.load(sem_proj_ckpt, map_location=device)
-            sem_proj.load_state_dict(sem_state)
-            print(f"[Init] Loaded sem_proj from {sem_proj_ckpt}")
-        except Exception as e:
-            print(f"[Init] Failed to load sem_proj from {sem_proj_ckpt}: {e}")
-    if stage in ("encoder", "full") and logit_scale_ckpt.exists():
-        try:
-            ls_state = torch.load(logit_scale_ckpt, map_location=device)
-            if isinstance(ls_state, dict) and "logit_scale" in ls_state:
-                logit_scale.data.copy_(ls_state["logit_scale"].to(device))
-            elif torch.is_tensor(ls_state):
-                logit_scale.data.copy_(ls_state.to(device))
-            print(f"[Init] Loaded logit_scale from {logit_scale_ckpt}")
-        except Exception as e:
-            print(f"[Init] Failed to load logit_scale from {logit_scale_ckpt}: {e}")
+    encoder_ckpt = ckpt_dir / "motionclip_encoder_joint_best.pth"
+    full_model_ckpt = ckpt_dir / "motionclip_full_joint_best.pth"
+    
+    if stage in ("encoder", "full"):
+        # sem_proj と logit_scale をロード
+        if sem_proj_ckpt.exists():
+            try:
+                sem_state = torch.load(sem_proj_ckpt, map_location=device)
+                sem_proj.load_state_dict(sem_state)
+                print(f"[Init] Loaded sem_proj from {sem_proj_ckpt}")
+            except Exception as e:
+                print(f"[Init] Failed to load sem_proj from {sem_proj_ckpt}: {e}")
+        if logit_scale_ckpt.exists():
+            try:
+                ls_state = torch.load(logit_scale_ckpt, map_location=device)
+                if isinstance(ls_state, dict) and "logit_scale" in ls_state:
+                    logit_scale.data.copy_(ls_state["logit_scale"].to(device))
+                elif torch.is_tensor(ls_state):
+                    logit_scale.data.copy_(ls_state.to(device))
+                print(f"[Init] Loaded logit_scale from {logit_scale_ckpt}")
+            except Exception as e:
+                print(f"[Init] Failed to load logit_scale from {logit_scale_ckpt}: {e}")
+        
+        # MotionCLIP 側も前段の best からロード（段階的 fine-tuning 用）
+        if stage == "full" and full_model_ckpt.exists():
+            try:
+                model.load_state_dict(torch.load(full_model_ckpt, map_location=device))
+                print(f"[Init] Loaded full model from {full_model_ckpt}")
+            except Exception as e:
+                print(f"[Init] Failed to load full model from {full_model_ckpt}: {e}")
+        elif encoder_ckpt.exists():
+            try:
+                model.encoder.load_state_dict(torch.load(encoder_ckpt, map_location=device))
+                print(f"[Init] Loaded encoder from {encoder_ckpt}")
+            except Exception as e:
+                print(f"[Init] Failed to load encoder from {encoder_ckpt}: {e}")
 
     # Stage-aware freezing
     trainable_groups = []
@@ -571,43 +571,36 @@ def train_joint(
         f"lr_decoder={lr_decoder}, lambda_vae={lambda_vae}, "
         f"lambda_contrastive={lambda_contrastive}, temp={temp}"
     )
+
+    # Calculate weights for WeightedRandomSampler to handle class imbalance
+    # _indices に出てくるラベルだけでカウントしてロバストに
+    label_counts = {}
+    for (lab, _) in train_dataset._indices:
+        label_counts[lab] = label_counts.get(lab, 0) + 1
+    weights = [1.0 / label_counts[lab] for (lab, _) in train_dataset._indices]
+    
+    # Create DataLoader
+    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+    dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, drop_last=True, num_workers=0)
+    data_iterator = iter(dataloader)
     
     for step in range(1, steps + 1):
-        model.train() # Ensure train mode
+        # stage=freeze では MotionCLIP を推論モードのまま保つ（BN/Dropout の挙動を固定）
+        if stage == "freeze":
+            model.eval()
+        else:
+            model.train()
         
-        # 1. Prepare Batch (from TRAIN dataset)
-        xs = []
-        ys = []
-        
-        # Simple random sampling over labels
-        for _ in range(batch_size):
-            lab_idx = random.randint(0, len(labels) - 1)
-            lab = labels[lab_idx]
+        # 1. Get Batch
+        try:
+            x_batch, y_batch = next(data_iterator)
+        except StopIteration:
+            data_iterator = iter(dataloader)
+            x_batch, y_batch = next(data_iterator)
             
-            # Check if data exists for this label
-            if not train_dataset.samples_by_label.get(lab):
-                continue
-
-            # NEW: use get_sample() to perform random crop on the fly
-            arr = train_dataset.get_sample(lab)  # (T, 14, 2)
-            
-            xs.append(arr)
-            ys.append(lab_idx)
-            
-        if not xs: continue
-            
-        coords = np.stack(xs, axis=0) # (B, T, 14, 2)
-        # 修正: MotionCLIPは (B, J, C, T) ではなく、 (B, T, J, C) か、
-        # あるいは Encoder内部で permute してるか確認が必要。
-        # MotionCLIPのDataset.__getitem__を見ると:
-        # ret = ret.permute(1, 2, 0).contiguous() -> (J, C, T) で返してる
-        # collate_fnで stack -> (B, J, C, T) になるはず。
-        
-        # なので、ここでは (B, J, C, T) に変換するのが正しい。
-        coords = coords.transpose(0, 2, 3, 1) # (B, 14, 2, T) -> (B, J, C, T)
-        
-        x_batch = torch.from_numpy(coords).to(device)
-        y_batch = torch.tensor(ys, dtype=torch.long, device=device)
+        # Transpose: (B, T, 14, 2) -> (B, 14, 2, T)
+        x_batch = x_batch.permute(0, 2, 3, 1).to(device)
+        y_batch = y_batch.to(device)
         
         B, _, _, Tcur = x_batch.shape
         mask = torch.ones((B, Tcur), dtype=torch.bool, device=device)
@@ -617,14 +610,14 @@ def train_joint(
             "x": x_batch,
             "mask": mask,
             "lengths": lengths,
-            "y": torch.zeros((B,), dtype=torch.long, device=device) # Dummy class
+            "y": torch.zeros((B,), dtype=torch.long, device=device) # Dummy class for VAE
         }
         
         # 2. Forward (VAE)
         batch = model(batch)
         
         # 3. VAE Loss
-        vae_loss, losses_detail = model.compute_loss(batch)
+        vae_loss, _ = model.compute_loss(batch)
         
         # 4. Contrastive Loss
         z_m = batch["mu"]
@@ -798,7 +791,7 @@ def train_joint(
 
         # Periodic Save (Backup)
         if step % 1000 == 0:
-             torch.save(model.state_dict(), ckpt_dir / f"motionclip_full_step{step}.pth")
+            torch.save(model.state_dict(), ckpt_dir / f"motionclip_full_step{step}.pth")
 
     # Final Save
     print(f"Saving final models to {ckpt_dir}")
@@ -895,9 +888,11 @@ def main():
 
     hoyo_root = HOYO_ROOT
     if args.run_name:
-        out_dir = hoyo_root / "joint_training_results" / args.run_name
+        run_name = args.run_name
     else:
-        out_dir = hoyo_root / "joint_training_results"
+        # デフォルトでタイムスタンプを付けて、実験結果の上書きを防ぐ
+        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = hoyo_root / "joint_training_results" / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = out_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
