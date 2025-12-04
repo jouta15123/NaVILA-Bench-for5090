@@ -122,50 +122,53 @@ def detect_label_mode(snapshot: SnapshotData) -> str:
     return "fine"
 
 
-def convert_to_coarse(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray]:
-    """Fine/Coarseを問わず、Coarse 4クラス基準へマッピング"""
-    mode = detect_label_mode(snapshot)
-    
-    # 各サンプルのラベル名をCoarse名へ写像
-    labels_coarse = []
+def _map_samples_to_coarse(snapshot: SnapshotData) -> np.ndarray:
+    """各サンプルを4クラスラベルにマッピング"""
+    coarse_indices = []
+    label_list = list(snapshot.label_list)
     for lbl_idx in snapshot.labels_idx:
-        label_name = snapshot.label_list[int(lbl_idx)]
+        label_name = label_list[int(lbl_idx)]
         coarse_name = LABEL_TO_COARSE.get(label_name)
         if coarse_name is None:
             raise ValueError(f"Label '{label_name}' is not assigned to any coarse group.")
-        coarse_idx = COARSE_LABELS.index(coarse_name)
-        labels_coarse.append(coarse_idx)
-    labels_coarse = np.asarray(labels_coarse, dtype=np.int64)
-    
-    # プロトタイプ生成（COARSE_LABELS順に整列）
-    vectors = []
-    if mode == "coarse":
-        for c_name in COARSE_LABELS:
-            if c_name not in snapshot.label_list:
-                raise ValueError(f"Snapshot '{snapshot.name}' lacks prototype for coarse label '{c_name}'.")
-            idx = snapshot.label_list.index(c_name)
-            vectors.append(snapshot.z_s_cls[idx])
-    else:
-        for c_name in COARSE_LABELS:
-            fine_names = COARSE_GROUPS[c_name]
-            fine_indices = [snapshot.label_list.index(fn) for fn in fine_names if fn in snapshot.label_list]
-            if not fine_indices:
-                raise ValueError(f"No fine labels found for coarse group '{c_name}' in snapshot '{snapshot.name}'.")
-            vectors.append(np.mean(snapshot.z_s_cls[fine_indices], axis=0))
-    
-    z_s_coarse = normalize(np.stack(vectors, axis=0))
-    return labels_coarse, z_s_coarse
+        coarse_indices.append(COARSE_LABELS.index(coarse_name))
+    return np.asarray(coarse_indices, dtype=np.int64)
+
+
+def _compute_centroids(z_vectors: np.ndarray, labels_idx: np.ndarray, num_classes: int) -> np.ndarray:
+    """ラベルごとにモーション潜在の重心を計算"""
+    centroids = np.zeros((num_classes, z_vectors.shape[1]), dtype=np.float32)
+    for cls in range(num_classes):
+        mask = labels_idx == cls
+        if mask.any():
+            centroid = z_vectors[mask].mean(axis=0, keepdims=True)
+            centroids[cls] = normalize(centroid)[0]
+    return centroids
+
+
+def convert_to_coarse(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray]:
+    """Fine/Coarseを問わず、Coarse 4クラス基準へマッピング（モーション重心ベース）"""
+    labels_coarse = _map_samples_to_coarse(snapshot)
+    z_m = normalize(snapshot.z_m)
+    coarse_centroids = _compute_centroids(z_m, labels_coarse, len(COARSE_LABELS))
+    return labels_coarse, coarse_centroids
+
+
+def get_fine_centroids(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fineラベル用にモーション潜在の重心を計算"""
+    z_m = normalize(snapshot.z_m)
+    labels_fine = snapshot.labels_idx.astype(int)
+    centroids = _compute_centroids(z_m, labels_fine, len(snapshot.label_list))
+    return z_m, centroids, labels_fine
 
 
 def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
-    """各種メトリクスを計算"""
-    labels_idx, z_s_cls = convert_to_coarse(snapshot)
-    label_list = COARSE_LABELS
-
+    """各種メトリクスを計算（モーション重心ベース）"""
     z_m = normalize(snapshot.z_m)
+    labels_idx, z_centroids = convert_to_coarse(snapshot)
     
     # Cosine similarity で予測
-    sims = z_m @ z_s_cls.T
+    sims = z_m @ z_centroids.T
     preds = sims.argmax(axis=1)
     
     # Accuracy
@@ -181,7 +184,7 @@ def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
     # Silhouette Score
     try:
         sil = silhouette_score(z_m, labels_idx)
-    except:
+    except Exception:
         sil = 0.0
     
     return {
@@ -189,15 +192,14 @@ def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
         "accuracy_top3": acc_top3,
         "silhouette": sil,
         "n_samples": len(z_m),
-        "n_classes": len(label_list),
+        "n_classes": len(COARSE_LABELS),
     }
 
 
 def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
     """1x2 PCA 比較プロット（Sarashina vs SigLIP）
     
-    モーションサンプルを4クラス（Coarse）で色分けし、
-    11個のセマンティックプロトタイプ（★）を表示。
+    モーションサンプルを4クラス（Coarse）で色分けして比較する。
     """
     n_snapshots = min(len(snapshots), 2)
     fig, axes = plt.subplots(1, n_snapshots, figsize=(7 * n_snapshots, 6))
@@ -210,13 +212,10 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
     for idx, snapshot in enumerate(snapshots[:2]):
         ax = axes[idx]
         
-        # PCA 実行（モーションサンプルのみでfitして、プロトタイプはtransform）
-        z_m = normalize(snapshot.z_m)
-        z_s_cls = normalize(snapshot.z_s_cls)
-        
+        # PCA 実行（モーションサンプルのみでfit）
+        z_m, z_fine_centroids, labels_fine = get_fine_centroids(snapshot)
         pca = PCA(n_components=2)
         z_pca_samples = pca.fit_transform(z_m)
-        z_pca_protos = pca.transform(z_s_cls)
         
         pc1_var = pca.explained_variance_ratio_[0] * 100
         pc2_var = pca.explained_variance_ratio_[1] * 100
@@ -241,26 +240,10 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
             )
             plotted_labels.add(coarse_name)
         
-        # プロトタイプを★でプロット（Fine/Coarse問わず）
-        for i in range(len(z_pca_protos)):
-            proto_label = snapshot.label_list[i]
-            coarse_name = LABEL_TO_COARSE.get(proto_label, proto_label)
-            color = COARSE_COLORS.get(coarse_name, FALLBACK_COLOR)
-            ax.scatter(
-                z_pca_protos[i, 0],
-                z_pca_protos[i, 1],
-                c=color,
-                marker="*",
-                s=250,
-                edgecolors="black",
-                linewidths=1,
-                zorder=10,
-            )
-        
         # メトリクス計算（提供クラス数 / Coarse 4クラス）
-        sims_fine = z_m @ z_s_cls.T
+        sims_fine = z_m @ z_fine_centroids.T
         preds_fine = sims_fine.argmax(axis=1)
-        acc_fine = (preds_fine == snapshot.labels_idx).mean()
+        acc_fine = (preds_fine == labels_fine).mean()
         metrics = compute_metrics(snapshot)
         label_mode = detect_label_mode(snapshot)
         fine_label_desc = f"{len(snapshot.label_list)}クラス"
@@ -294,16 +277,14 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
     
     # 最大2つのスナップショットを想定（Sarashina, SigLIP）
     for col_idx, snapshot in enumerate(snapshots[:2]):
-        z_m = normalize(snapshot.z_m)
+        z_m, z_fine_centroids, labels_fine = get_fine_centroids(snapshot)
         
         # === 上段: 11クラス（Fine）混同行列 ===
         ax_fine = axes[0, col_idx]
         
         # Fine評価: 元のラベルとプロトタイプをそのまま使用
-        z_s_fine = normalize(snapshot.z_s_cls)
-        sims_fine = z_m @ z_s_fine.T
+        sims_fine = z_m @ z_fine_centroids.T
         preds_fine = sims_fine.argmax(axis=1)
-        labels_fine = snapshot.labels_idx
         fine_label_count = len(snapshot.label_list)
         cm_fine = confusion_matrix(
             labels_fine,
@@ -337,8 +318,8 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
         ax_coarse = axes[1, col_idx]
         
         # Coarse変換
-        labels_coarse, z_s_coarse = convert_to_coarse(snapshot)
-        sims_coarse = z_m @ z_s_coarse.T
+        labels_coarse, z_coarse_centroids = convert_to_coarse(snapshot)
+        sims_coarse = z_m @ z_coarse_centroids.T
         preds_coarse = sims_coarse.argmax(axis=1)
         
         # 4クラスの混同行列
