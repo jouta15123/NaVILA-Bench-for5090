@@ -180,6 +180,61 @@ aria2c -c -x16 -s16 -k1M \
 - **VLM 用ポート**: `vlm_server.py --port` と評価側 `--vlm_port` を一致させる（デフォルト 54321）
 - 指示の送信方法は運用で選択（例: Isaac Sim 実行ターミナル操作、将来的にソケット連携など）
 
+## 現在進行中のタスク：HoYo + MotionCLIP 対照学習
+オノマトペ（意味的特徴）とモーション（動作的特徴）の共有潜在空間を構築し、オノマトペ指示に基づく動作生成や評価を行うための学習実験です。
+
+### 目的
+- 日本語オノマトペ（例：「すたすた」「のろのろ」）と、それに対応する歩行モーションの関係を学習する。
+- **MotionCLIP** のモーションエンコーダと、テキストエンコーダ（**Sarashina BERT**）を Joint Embedding 空間へ射影し、対照学習（Contrastive Learning）を行う。
+- これにより、「オノマトペ → モーション」の生成や、「現在のモーション → オノマトペっぽいか」の評価（報酬計算）を可能にする。
+
+### 実験環境
+- 仮想環境パス: `/home/jouta/venvs/motionclip/`
+- データセット: **HoYo Dataset**（11種類のオノマトペラベル付き歩行モーション）
+- 実装ファイル:
+    - `hoyo_v1_1/train_motionclip_joint.py`: 学習メインスクリプト
+    - `hoyo_v1_1/hoyo_sem_motion_contrastive_motionclip.py`: データセット定義、モデルユーティリティ
+
+### 学習コマンド例
+```bash
+# motionclip環境のpythonを使用
+/home/jouta/venvs/motionclip/bin/python hoyo_v1_1/train_motionclip_joint.py \
+  --stage full \
+  --steps 5000 \
+  --lambda-contrastive 0.1 \
+  --batch-size 32 \
+  --lr 1e-5
+```
+
+---
+
+## 今後の計画：強化学習による質感（Style）の付与
+学習した HoYo + MotionCLIP モデルを報酬関数として利用し、ロボットのナビゲーション動作にオノマトペの質感を付与します。
+
+### 目的
+- ユーザーが「てくてく歩いて」と指示した際に、ナビゲーションの軌道追従だけでなく、その歩き方のスタイル（質感）も反映させる。
+
+### アプローチ
+- **強化学習 (RL)** を用いて、既存のナビゲーション方策（あるいは低レベル歩行制御）に追加学習または Fine-tuning を行う。
+- **スタイル報酬 (Style Reward)** を導入する。
+
+### 実装方針
+- 実装箇所: `scripts/style_reward_module.py` (現在スタブ実装)
+- **報酬計算の仕組み**:
+    1. **Observation**: ロボットの関節角度やベース速度などの履歴（Window Size: 60フレーム等）。
+    2. **Encoding**:
+        - 履歴を HOYO フォーマット（14関節, 2D座標）にリターゲティング変換。
+        - 学習済み MotionCLIP Encoder に通して潜在ベクトル $z_{motion}$ を取得。
+    3. **Target**:
+        - 指示オノマトペ（例：「のろのろ」）をテキストエンコーダに通し、投影層を経て潜在ベクトル $z_{text}$ を取得。
+    4. **Reward**:
+        - $Reward_{style} = \beta \cdot \text{CosineSimilarity}(z_{motion}, z_{text})$
+        - 動作が指示オノマトペの意味内容に近いほど高い報酬を与える。
+
+### 課題
+- **リターゲティング**: H1ロボット（人型）の関節構造から、HOYOデータセット（簡易スケルトン）への変換ロジックの実装。
+- **推論コスト**: 毎ステップ（あるいは数ステップごと）に Transformer Encoder を回すため、リアルタイム性の確保が必要。
+
 ## 参考資料
 - `NaVILA_paper.md`: NaVILA の元論文まとめ
 - `original_scripts/navila_eval.py`: ベンチマークの元となる評価実装
