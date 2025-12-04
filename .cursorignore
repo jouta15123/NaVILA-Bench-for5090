@@ -1,0 +1,15 @@
+# System directories that should be ignored
+isaaclab_exts/omni.isaac.vlnce/assets/run/systemd/
+
+# Git ignored directories (for consistency)
+isaaclab_exts/omni.isaac.vlnce/assets
+__pycache__/
+*.pyc
+*.egg-info
+.pytest_cache/
+.mypy_cache/
+eval_results/
+logs/
+.env
+
+
