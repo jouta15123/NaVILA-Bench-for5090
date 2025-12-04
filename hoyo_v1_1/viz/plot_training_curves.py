@@ -4,10 +4,11 @@
 SarashinaとSigLIPエンコーダの学習ログを比較プロット
 """
 
+import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import matplotlib.pyplot as plt
 import matplotlib
@@ -241,28 +242,45 @@ def plot_test_metrics_detail(
     return output_path
 
 
-def main():
-    # Paths
+def parse_args() -> argparse.Namespace:
+    """
+    CLI引数を定義し、デフォルトで直近（2025-12-04）のログを参照する。
+    """
     base_dir = Path(__file__).resolve().parents[1] / "joint_training_results"
-    sarashina_log = base_dir / "sarashina_full_fixed" / "logs" / "train_log_20251203_163810.txt"
-    siglip_log = base_dir / "siglip_full_fixed" / "logs" / "train_log_20251203_164052.txt"
-    output_dir = Path(__file__).resolve().parent / "outputs" / "encoder_comparison_full"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    if not sarashina_log.exists():
-        print(f"Error: Sarashina log not found: {sarashina_log}")
+    default_sarashina = base_dir / "sarashina_full_fixed" / "logs" / "train_log_20251204_150735.txt"
+    default_siglip = base_dir / "siglip_full_fixed" / "logs" / "train_log_20251204_151008.txt"
+    default_out = Path(__file__).resolve().parent / "outputs" / "encoder_comparison_full"
+
+    parser = argparse.ArgumentParser(
+        description="Plot loss/accuracy curves for Sarashina vs SigLIP text encoders."
+    )
+    parser.add_argument("--sarashina-log", type=Path, default=default_sarashina,
+                        help=f"Path to Sarashina log (default: {default_sarashina})")
+    parser.add_argument("--siglip-log", type=Path, default=default_siglip,
+                        help=f"Path to SigLIP log (default: {default_siglip})")
+    parser.add_argument("--output-dir", type=Path, default=default_out,
+                        help=f"Directory to save plots (default: {default_out})")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    if not args.sarashina_log.exists():
+        print(f"Error: Sarashina log not found: {args.sarashina_log}")
         sys.exit(1)
-    if not siglip_log.exists():
-        print(f"Error: SigLIP log not found: {siglip_log}")
+    if not args.siglip_log.exists():
+        print(f"Error: SigLIP log not found: {args.siglip_log}")
         sys.exit(1)
-    
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+
     # Generate plots
-    plot_training_comparison(sarashina_log, siglip_log, output_dir)
-    plot_test_metrics_detail(sarashina_log, siglip_log, output_dir)
-    
-    print(f"\nAll plots saved to: {output_dir}")
+    plot_training_comparison(args.sarashina_log, args.siglip_log, args.output_dir)
+    plot_test_metrics_detail(args.sarashina_log, args.siglip_log, args.output_dir)
+
+    print(f"\nAll plots saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
     main()
-
