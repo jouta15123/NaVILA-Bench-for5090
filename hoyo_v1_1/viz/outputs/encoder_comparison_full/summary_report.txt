@@ -1,0 +1,29 @@
+======================================================================
+SigLIP vs Sarashina 比較実験サマリー
+======================================================================
+
+### sarashina_full_fixed ###
+--------------------------------------------------
+  Label Mode: fine (11 classes)
+  Samples: 292
+  Accuracy (Coarse 4-class): 78.4%
+  Accuracy Top-3: 99.0%
+  Silhouette Score: 0.1138
+
+### siglip_full_fixed ###
+--------------------------------------------------
+  Label Mode: fine (11 classes)
+  Samples: 292
+  Accuracy (Coarse 4-class): 77.4%
+  Accuracy Top-3: 99.0%
+  Silhouette Score: 0.1222
+
+======================================================================
+比較サマリー
+======================================================================
+
+Average Accuracy:
+  Sarashina: 78.4%
+  SigLIP:    77.4%
+
+→ Sarashina が 1.0pp 優位
