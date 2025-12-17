@@ -2,7 +2,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-import clip
+try:
+    import clip
+except ImportError:
+    clip = None
 from ..tools.losses import get_loss_function
 from ..rotation2xyz import Rotation2xyz
 

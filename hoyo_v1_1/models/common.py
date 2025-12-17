@@ -7,7 +7,30 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-from sentence_transformers import SentenceTransformer
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    print("Warning: 'sentence_transformers' not found. Mocking it.")
+    import hashlib
+    class SentenceTransformer:
+        def __init__(self, model_name_or_path, device=None):
+            pass
+        def encode(self, sentences, convert_to_tensor=False, device=None):
+            import torch
+            # Sarashina embedding dim used during training was 1792 (see sem_proj checkpoints).
+            embed_dim = 1792
+            if isinstance(sentences, str):
+                sentences = [sentences]
+            vecs = []
+            for s in sentences:
+                # Deterministic pseudo-embedding so repeated calls are stable.
+                seed = int(hashlib.sha256(s.encode("utf-8")).hexdigest()[:8], 16)
+                g = torch.Generator(device=device).manual_seed(seed)
+                v = torch.randn(embed_dim, generator=g, device=device)
+                vecs.append(v)
+            out = torch.stack(vecs, dim=0)
+            return out if convert_to_tensor else out.cpu().numpy()
+
 
 
 INSTRUCTION_ONOMATOPEIA = [
@@ -241,9 +264,9 @@ def encode_semantics_sarashina(labels: List[str], device: torch.device) -> torch
     model_id = "sbintuitions/sarashina-embedding-v2-1b"
     model = SentenceTransformer(model_id, device=str(device))
     texts = [f"{w}と歩いている。" if w != "通常" else "普通に歩いている。" for w in labels]
-    print("Semantic texts:")
-    for t in texts:
-        print(" ", t)
+    # print("Semantic texts:")
+    # for t in texts:
+    #     print(" ", t)
     emb = model.encode(texts, convert_to_tensor=True, device=device)
     emb = F.normalize(emb, dim=-1)
     return emb  # (B, D_sem)
@@ -260,9 +283,9 @@ def encode_semantics_siglip(
     text_model = SiglipTextModel.from_pretrained(model_id).to(device)
 
     texts = [f"{w}と歩いている。" if w != "通常" else "普通に歩いている。" for w in labels]
-    print("Semantic texts (SigLIP):")
-    for t in texts:
-        print(" ", t)
+    # print("Semantic texts (SigLIP):")
+    # for t in texts:
+    #     print(" ", t)
 
     encoded = tokenizer(texts, return_tensors="pt", padding=True, truncation=True).to(device)
     with torch.no_grad():

@@ -7,6 +7,10 @@ import os
 from dataclasses import asdict
 from torch.utils.tensorboard import SummaryWriter
 
+# Avoid git ownership errors inside mounted dirs (CI/docker). Do this *before* importing wandb.
+os.environ.setdefault("WANDB_IGNORE_GIT", "true")
+os.environ.setdefault("WANDB_DISABLE_CODE", "true")
+
 try:
     import wandb
 except ModuleNotFoundError:
@@ -19,19 +23,25 @@ class WandbSummaryWriter(SummaryWriter):
     def __init__(self, log_dir: str, flush_secs: int, cfg):
         super().__init__(log_dir, flush_secs)
 
+        # project is still required
         try:
             project = cfg["wandb_project"]
         except KeyError:
             raise KeyError("Please specify wandb_project in the runner config, e.g. legged_gym.")
 
-        try:
-            entity = os.environ["WANDB_USERNAME"]
-        except KeyError:
-            raise KeyError(
-                "Wandb username not found. Please run or add to ~/.bashrc: export WANDB_USERNAME=YOUR_USERNAME"
-            )
+        # entity is optional: prefer cfg, then env vars, otherwise None (let wandb pick from API key)
+        entity = cfg.get("wandb_entity")
+        if entity is None:
+            entity = os.environ.get("WANDB_USERNAME") or os.environ.get("WANDB_ENTITY")
 
-        wandb.init(project=project, entity=entity)
+        # optional metadata like tags/group/job_type (kept for compatibility with upstream rsl_rl)
+        tags = cfg.get("wandb_tags", [])
+        group = cfg.get("wandb_group", None)
+        job_type = cfg.get("wandb_job_type", None)
+
+        # Also pass settings to disable git/code scanning explicitly.
+        # wandb 0.12.* doesn't accept _disable_git/_disable_code in settings; rely on env flags.
+        wandb.init(project=project, entity=entity, tags=tags, group=group, job_type=job_type)
 
         # Change generated name to project-number format
         wandb.run.name = project + wandb.run.name.split("-")[-1]

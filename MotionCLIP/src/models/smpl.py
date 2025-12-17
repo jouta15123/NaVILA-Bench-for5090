@@ -3,8 +3,16 @@ import torch
 
 import contextlib
 
-from smplx import SMPLLayer as _SMPLLayer
-from smplx.lbs import vertices2joints
+try:
+    from smplx import SMPLLayer as _SMPLLayer
+    from smplx.lbs import vertices2joints
+except ImportError:
+    import torch.nn as nn
+    class _SMPLLayer(nn.Module):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+    def vertices2joints(*args, **kwargs):
+        raise NotImplementedError("smplx not installed")
 
 action2motion_joints = [8, 1, 2, 3, 4, 5, 6, 7, 0, 9, 10, 11, 12, 13, 14, 21, 24, 38]
 

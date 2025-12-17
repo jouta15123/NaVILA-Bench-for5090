@@ -1,0 +1,27 @@
+{
+  "_comment": "H1 Robot to HOYO Skeleton Mapping",
+  "_description": "Maps H1 body links to HOYO 14-joint skeleton format",
+  "_hoyo_order": "0:Head, 1:Neck, 2:R-Shoulder, 3:R-Elbow, 4:R-Hand, 5:L-Shoulder, 6:L-Elbow, 7:L-Hand, 8:R-Hip, 9:R-Knee, 10:R-Ankle, 11:L-Hip, 12:L-Knee, 13:L-Ankle",
+  
+  "head": "torso_link",
+  "neck": "torso_link",
+
+  "r_shoulder": "right_shoulder_pitch_link",
+  "r_elbow": "right_elbow_link",
+  "r_hand": "right_elbow_link",
+
+  "l_shoulder": "left_shoulder_pitch_link",
+  "l_elbow": "left_elbow_link",
+  "l_hand": "left_elbow_link",
+
+  "r_hip": "right_hip_yaw_link",
+  "r_knee": "right_knee_link",
+  "r_ankle": "right_ankle_link",
+
+  "l_hip": "left_hip_yaw_link",
+  "l_knee": "left_knee_link",
+  "l_ankle": "left_ankle_link",
+
+  "_offsets_note": "Offsets are computed automatically in style_module.py based on missing joints",
+  "_h1_minimal_note": "h1_minimal may not have arm links - offsets will be applied automatically"
+}

@@ -71,7 +71,11 @@ def store_code_state(logdir, repositories) -> list:
             continue
         # get the name of the repository
         repo_name = pathlib.Path(repo.working_dir).name
-        t = repo.head.commit.tree
+        try:
+            t = repo.head.commit.tree
+        except Exception as e:
+            print(f"Could not get git commit tree for {repo_name}: {e}. Skipping.")
+            continue
         diff_file_name = os.path.join(git_log_dir, f"{repo_name}.diff")
         # check if the diff file already exists
         if os.path.isfile(diff_file_name):

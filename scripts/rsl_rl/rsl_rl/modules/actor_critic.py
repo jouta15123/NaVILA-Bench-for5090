@@ -134,3 +134,76 @@ def get_activation(act_name):
     else:
         print("invalid activation function!")
         return None
+
+
+class ResidualActorCritic(ActorCritic):
+    """
+    Residual policy that adds a style-conditioned residual to a frozen base policy.
+    action = base_policy(obs) + residual_scale * residual_policy([obs, style])
+    """
+
+    def __init__(
+        self,
+        num_actor_obs,
+        num_critic_obs,
+        num_actions,
+        style_dim=512,
+        base_policy_checkpoint=None,
+        residual_scale=0.1,
+        **kwargs,
+    ):
+        self.style_dim = style_dim
+        self.residual_scale = residual_scale
+
+        super().__init__(num_actor_obs, num_critic_obs, num_actions, **kwargs)
+
+        # Optional frozen base policy (without style dim)
+        self.base_policy = None
+        if base_policy_checkpoint is not None and len(base_policy_checkpoint) > 0:
+            print(f"Loading Base Policy from {base_policy_checkpoint}...")
+            base_actor_obs = num_actor_obs - style_dim
+            try:
+                self.base_policy = ActorCritic(
+                    num_actor_obs=base_actor_obs,
+                    num_critic_obs=num_critic_obs,
+                    num_actions=num_actions,
+                    **kwargs,
+                )
+                loaded_dict = torch.load(base_policy_checkpoint, map_location=kwargs.get("device", "cpu"))
+                if "model_state_dict" in loaded_dict:
+                    self.base_policy.load_state_dict(loaded_dict["model_state_dict"])
+                else:
+                    self.base_policy.load_state_dict(loaded_dict)
+                self.base_policy.eval()
+                for p in self.base_policy.parameters():
+                    p.requires_grad = False
+                print("Base Policy Loaded.")
+            except Exception as e:
+                print(f"Failed to load base policy: {e}")
+                self.base_policy = None
+        else:
+            print("No base policy checkpoint provided. Training from scratch (Residual only).")
+
+    def act(self, observations, **kwargs):
+        # observations: [base_obs, style_latent]
+        self.update_distribution(observations)
+        residual_action = self.distribution.sample()
+
+        if self.base_policy is not None:
+            obs_base = observations[:, :-self.style_dim]
+            base_mean = self.base_policy.act_inference(obs_base)
+
+            residual_mean = self.distribution.mean
+            combined_mean = base_mean + self.residual_scale * residual_mean
+            self.distribution = Normal(combined_mean, self.std)
+            return self.distribution.sample()
+
+        return residual_action
+
+    def act_inference(self, observations):
+        residual_mean = self.actor(observations)
+        if self.base_policy is not None:
+            obs_base = observations[:, :-self.style_dim]
+            base_mean = self.base_policy.act_inference(obs_base)
+            return base_mean + self.residual_scale * residual_mean
+        return residual_mean
