@@ -1,0 +1,8 @@
+assets/
+logs/
+wandb/
+eval_results/
+${data}/
+*.pyc
+*.egg-info
+.vscode/
