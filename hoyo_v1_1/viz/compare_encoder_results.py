@@ -122,11 +122,10 @@ def detect_label_mode(snapshot: SnapshotData) -> str:
     return "fine"
 
 
-def _map_samples_to_coarse(snapshot: SnapshotData) -> np.ndarray:
-    """各サンプルを4クラスラベルにマッピング"""
+def _map_labels_to_coarse(label_indices: np.ndarray, label_list: List[str]) -> np.ndarray:
+    """Fine/Coarseを問わず、ラベルインデックス列を4クラスIDにマップ"""
     coarse_indices = []
-    label_list = list(snapshot.label_list)
-    for lbl_idx in snapshot.labels_idx:
+    for lbl_idx in label_indices:
         label_name = label_list[int(lbl_idx)]
         coarse_name = LABEL_TO_COARSE.get(label_name)
         if coarse_name is None:
@@ -135,65 +134,92 @@ def _map_samples_to_coarse(snapshot: SnapshotData) -> np.ndarray:
     return np.asarray(coarse_indices, dtype=np.int64)
 
 
-def _compute_centroids(z_vectors: np.ndarray, labels_idx: np.ndarray, num_classes: int) -> np.ndarray:
-    """ラベルごとにモーション潜在の重心を計算"""
-    centroids = np.zeros((num_classes, z_vectors.shape[1]), dtype=np.float32)
-    for cls in range(num_classes):
-        mask = labels_idx == cls
-        if mask.any():
-            centroid = z_vectors[mask].mean(axis=0, keepdims=True)
-            centroids[cls] = normalize(centroid)[0]
-    return centroids
-
-
-def convert_to_coarse(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray]:
-    """Fine/Coarseを問わず、Coarse 4クラス基準へマッピング（モーション重心ベース）"""
-    labels_coarse = _map_samples_to_coarse(snapshot)
+def _coarse_predictions(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray, float, float]:
+    """
+    Coarse評価を統一的に算出。
+    - Fine学習スナップショット: fine logits -> coarseマッピングで判定
+    - Coarseスナップショット: 4プロトタイプそのまま使用
+    戻り値: (true_coarse, pred_coarse, acc1, acc_top3)
+    """
     z_m = normalize(snapshot.z_m)
-    coarse_centroids = _compute_centroids(z_m, labels_coarse, len(COARSE_LABELS))
-    return labels_coarse, coarse_centroids
+    z_s = normalize(snapshot.z_s_cls)
+    label_mode = detect_label_mode(snapshot)
+
+    if label_mode == "coarse":
+        # 4クラスそのまま
+        logits = z_m @ z_s.T
+        preds = logits.argmax(axis=1)
+        labels_coarse = snapshot.labels_idx.astype(int)
+        if logits.shape[1] >= 3:
+            topk = np.argsort(logits, axis=1)[:, -3:]
+            acc_top3 = np.mean([labels_coarse[i] in topk[i] for i in range(len(labels_coarse))])
+        else:
+            acc_top3 = (preds == labels_coarse).mean()
+        acc1 = (preds == labels_coarse).mean()
+        return labels_coarse, preds, acc1, acc_top3
+
+    # Fineモード: fine logits から coarse へマップ
+    logits_fine = z_m @ z_s.T
+    preds_fine = logits_fine.argmax(axis=1)
+    labels_coarse = _map_labels_to_coarse(snapshot.labels_idx, list(snapshot.label_list))
+    preds_coarse = _map_labels_to_coarse(preds_fine, list(snapshot.label_list))
+
+    if logits_fine.shape[1] >= 3:
+        topk_fine = np.argsort(logits_fine, axis=1)[:, -3:]
+        preds_coarse_topk = []
+        for i in range(len(topk_fine)):
+            coarse_set = { _map_labels_to_coarse(np.array([k]), list(snapshot.label_list))[0] for k in topk_fine[i] }
+            preds_coarse_topk.append(labels_coarse[i] in coarse_set)
+        acc_top3 = np.mean(preds_coarse_topk)
+    else:
+        acc_top3 = (preds_coarse == labels_coarse).mean()
+
+    acc1 = (preds_coarse == labels_coarse).mean()
+    return labels_coarse, preds_coarse, acc1, acc_top3
 
 
-def get_fine_centroids(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Fineラベル用にモーション潜在の重心を計算"""
+def get_fine_prototypes(snapshot: SnapshotData) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fineラベル用にテキスト埋め込みをプロトタイプとして取得"""
     z_m = normalize(snapshot.z_m)
+    z_s_cls = normalize(snapshot.z_s_cls)
     labels_fine = snapshot.labels_idx.astype(int)
-    centroids = _compute_centroids(z_m, labels_fine, len(snapshot.label_list))
-    return z_m, centroids, labels_fine
+    return z_m, z_s_cls, labels_fine
+
+
+def get_labels_coarse(snapshot: SnapshotData) -> np.ndarray:
+    """プロット用にCoarseラベルID列だけ取得"""
+    if detect_label_mode(snapshot) == "coarse":
+        return snapshot.labels_idx.astype(int)
+    return _map_labels_to_coarse(snapshot.labels_idx, list(snapshot.label_list))
 
 
 def compute_metrics(snapshot: SnapshotData) -> Dict[str, float]:
-    """各種メトリクスを計算（モーション重心ベース）"""
+    """Coarse精度は fine logits を coarse にマップして評価する"""
     z_m = normalize(snapshot.z_m)
-    labels_idx, z_centroids = convert_to_coarse(snapshot)
-    
-    # Cosine similarity で予測
-    sims = z_m @ z_centroids.T
-    preds = sims.argmax(axis=1)
-    
-    # Accuracy
-    acc = (preds == labels_idx).mean()
-    
-    # Top-3 Accuracy
-    if sims.shape[1] >= 3:
-        top3 = np.argsort(sims, axis=1)[:, -3:]
-        acc_top3 = np.mean([labels_idx[i] in top3[i] for i in range(len(labels_idx))])
-    else:
-        acc_top3 = acc
-    
-    # Silhouette Score
+    labels_coarse, preds_coarse, acc1, acc_top3 = _coarse_predictions(snapshot)
+
     try:
-        sil = silhouette_score(z_m, labels_idx)
+        sil = silhouette_score(z_m, labels_coarse)
     except Exception:
         sil = 0.0
-    
-    return {
-        "accuracy": acc,
+
+    metrics = {
+        "accuracy": acc1,
         "accuracy_top3": acc_top3,
         "silhouette": sil,
         "n_samples": len(z_m),
         "n_classes": len(COARSE_LABELS),
     }
+
+    if detect_label_mode(snapshot) == "fine":
+        # Calculate Fine Accuracy
+        z_m, z_s_cls, labels_fine = get_fine_prototypes(snapshot)
+        logits_fine = z_m @ z_s_cls.T
+        preds_fine = logits_fine.argmax(axis=1)
+        acc_fine = (preds_fine == labels_fine).mean()
+        metrics["accuracy_fine"] = acc_fine
+    
+    return metrics
 
 
 def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
@@ -213,7 +239,7 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
         ax = axes[idx]
         
         # PCA 実行（モーションサンプルのみでfit）
-        z_m, z_fine_centroids, labels_fine = get_fine_centroids(snapshot)
+        z_m, z_fine_prototypes, labels_fine = get_fine_prototypes(snapshot)
         pca = PCA(n_components=2)
         z_pca_samples = pca.fit_transform(z_m)
         
@@ -221,7 +247,7 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
         pc2_var = pca.explained_variance_ratio_[1] * 100
         
         # Coarseラベルに変換して色分け
-        labels_coarse, _ = convert_to_coarse(snapshot)
+        labels_coarse = get_labels_coarse(snapshot)
         
         # サンプルをCoarseグループごとにプロット
         plotted_labels = set()
@@ -241,7 +267,7 @@ def plot_pca_comparison(snapshots: List[SnapshotData], out_path: Path):
             plotted_labels.add(coarse_name)
         
         # メトリクス計算（提供クラス数 / Coarse 4クラス）
-        sims_fine = z_m @ z_fine_centroids.T
+        sims_fine = z_m @ z_fine_prototypes.T
         preds_fine = sims_fine.argmax(axis=1)
         acc_fine = (preds_fine == labels_fine).mean()
         metrics = compute_metrics(snapshot)
@@ -277,13 +303,13 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
     
     # 最大2つのスナップショットを想定（Sarashina, SigLIP）
     for col_idx, snapshot in enumerate(snapshots[:2]):
-        z_m, z_fine_centroids, labels_fine = get_fine_centroids(snapshot)
+        z_m, z_fine_prototypes, labels_fine = get_fine_prototypes(snapshot)
         
         # === 上段: 11クラス（Fine）混同行列 ===
         ax_fine = axes[0, col_idx]
         
         # Fine評価: 元のラベルとプロトタイプをそのまま使用
-        sims_fine = z_m @ z_fine_centroids.T
+        sims_fine = z_m @ z_fine_prototypes.T
         preds_fine = sims_fine.argmax(axis=1)
         fine_label_count = len(snapshot.label_list)
         cm_fine = confusion_matrix(
@@ -317,10 +343,8 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
         # === 下段: 4クラス（Coarse）混同行列 ===
         ax_coarse = axes[1, col_idx]
         
-        # Coarse変換
-        labels_coarse, z_coarse_centroids = convert_to_coarse(snapshot)
-        sims_coarse = z_m @ z_coarse_centroids.T
-        preds_coarse = sims_coarse.argmax(axis=1)
+        # Coarse評価（fine logits を coarse にマップ or 4クラスそのまま）
+        labels_coarse, preds_coarse, acc_coarse, _ = _coarse_predictions(snapshot)
         
         # 4クラスの混同行列
         cm_coarse = confusion_matrix(
@@ -345,8 +369,6 @@ def plot_confusion_comparison(snapshots: List[SnapshotData], out_path: Path):
         ax_coarse.set_ylabel('True', fontsize=10)
         ax_coarse.tick_params(axis='both', labelsize=9)
         
-        # 精度計算
-        acc_coarse = (preds_coarse == labels_coarse).mean()
         ax_coarse.set_title(f'{encoder_name} - 4クラス (Acc: {acc_coarse:.1%})', fontsize=12)
     
     plt.tight_layout()
@@ -430,6 +452,8 @@ def generate_summary_report(snapshots: List[SnapshotData], out_path: Path):
         lines.append(f"  Label Mode: {mode} ({len(snapshot.label_list)} classes)")
         lines.append(f"  Samples: {metrics['n_samples']}")
         lines.append(f"  Accuracy (Coarse 4-class): {metrics['accuracy']:.1%}")
+        if "accuracy_fine" in metrics:
+            lines.append(f"  Accuracy (Fine {len(snapshot.label_list)}-class): {metrics['accuracy_fine']:.1%}")
         lines.append(f"  Accuracy Top-3: {metrics['accuracy_top3']:.1%}")
         lines.append(f"  Silhouette Score: {metrics['silhouette']:.4f}")
         lines.append("")
@@ -452,9 +476,21 @@ def generate_summary_report(snapshots: List[SnapshotData], out_path: Path):
         lines.append(f"  SigLIP:    {sig_acc:.1%}")
         
         if sar_acc > sig_acc:
-            lines.append(f"\n→ Sarashina が {(sar_acc - sig_acc)*100:.1f}pp 優位")
+            lines.append(f"\n→ Sarashina が {(sar_acc - sig_acc)*100:.1f}pp 優位 (Coarse)")
         else:
-            lines.append(f"\n→ SigLIP が {(sig_acc - sar_acc)*100:.1f}pp 優位")
+            lines.append(f"\n→ SigLIP が {(sig_acc - sar_acc)*100:.1f}pp 優位 (Coarse)")
+
+        # Fine comparison if available
+        sar_fine = np.mean([compute_metrics(s).get("accuracy_fine", 0) for s in sarashina_results])
+        sig_fine = np.mean([compute_metrics(s).get("accuracy_fine", 0) for s in siglip_results])
+        
+        if sar_fine > 0 and sig_fine > 0:
+             lines.append(f"  Sarashina Fine: {sar_fine:.1%}")
+             lines.append(f"  SigLIP Fine:    {sig_fine:.1%}")
+             if sar_fine > sig_fine:
+                 lines.append(f"→ Sarashina が {(sar_fine - sig_fine)*100:.1f}pp 優位 (Fine)")
+             else:
+                 lines.append(f"→ SigLIP が {(sig_fine - sar_fine)*100:.1f}pp 優位 (Fine)")
     
     # Fine vs Coarse
     fine_results = [s for s in snapshots if "fine" in s.name.lower()]

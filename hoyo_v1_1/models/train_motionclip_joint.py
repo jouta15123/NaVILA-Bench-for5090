@@ -485,6 +485,12 @@ def train_joint(
     vis_max_per_label: int = 50,
     snapshot_splits=("test",),
     wandb_run=None,
+    # Training stability helpers
+    grad_clip: float = 0.5,
+    scheduler_type: str = "plateau",
+    plateau_patience: int = 3,
+    plateau_factor: float = 0.5,
+    early_stop_patience: int = 0,
 ):
     os.makedirs(out_dir, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
@@ -577,6 +583,21 @@ def train_joint(
         raise ValueError(f"Unknown stage '{stage}'")
 
     optimizer = torch.optim.AdamW(trainable_groups)
+
+    # Optional LR scheduler (helps prevent late-stage divergence)
+    scheduler = None
+    if scheduler_type == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=steps, eta_min=1e-6
+        )
+    elif scheduler_type == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=plateau_factor,
+            patience=plateau_patience,
+            min_lr=1e-6,
+        )
     
     if labels is None:
         labels = INSTRUCTION_ONOMATOPEIA
@@ -585,6 +606,7 @@ def train_joint(
     
     loss_history = []
     best_test_acc = -1.0
+    evals_since_best = 0
     
     # Running stats for readable logging
     running_stats = {
@@ -741,13 +763,16 @@ def train_joint(
         all_params = []
         for group in optimizer.param_groups:
             all_params.extend(group["params"])
-        torch.nn.utils.clip_grad_norm_(all_params, 0.5)
+        torch.nn.utils.clip_grad_norm_(all_params, grad_clip)
         optimizer.step()
         # Clamp logit_scale to keep temperature in a reasonable range.
         # Temp = exp(-logit_scale). Range [0.01, 100] -> logit_scale [-4.6, 4.6]
         # Default temp 0.07 is ~2.66. Previous clamp [log(0.1), log(10)] = [-2.3, 2.3] clipped it.
         with torch.no_grad():
             logit_scale.data.clamp_(np.log(1.0 / 100.0), np.log(1.0 / 0.01))
+
+        if scheduler_type == "cosine" and scheduler is not None:
+            scheduler.step()
         
         loss_history.append(total_loss.item())
 
@@ -809,7 +834,7 @@ def train_joint(
                     "test/acc_top3": metrics["acc@3"],
                     "test/mpjpe": metrics["mpjpe"],
                 }, step=step)
-            
+
             # Save BEST model based on Test Acc
             if test_acc > best_test_acc:
                 best_test_acc = test_acc
@@ -818,6 +843,16 @@ def train_joint(
                 torch.save(sem_proj.state_dict(), ckpt_dir / "sem_proj_joint_best.pth")
                 torch.save({"logit_scale": logit_scale.detach().cpu()}, ckpt_dir / "logit_scale_joint_best.pt")
                 torch.save(model.state_dict(), ckpt_dir / "motionclip_full_joint_best.pth")
+                evals_since_best = 0
+            else:
+                evals_since_best += 1
+
+            if scheduler_type == "plateau" and scheduler is not None:
+                scheduler.step(test_acc)
+
+            if early_stop_patience > 0 and evals_since_best >= early_stop_patience:
+                print(f"Early stopping triggered after {evals_since_best} evals without improvement.")
+                break
 
         # Periodic Save (Backup)
         if step % 1000 == 0:
@@ -906,6 +941,36 @@ def parse_args():
         type=str,
         default="test",
         help="Comma-separated list of dataset splits to include when saving latent snapshots (e.g., 'test' or 'train,test').",
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=0.5,
+        help="Max gradient norm (applied to all trainable params).",
+    )
+    parser.add_argument(
+        "--scheduler",
+        choices=["none", "plateau", "cosine"],
+        default="plateau",
+        help="Learning-rate scheduler type.",
+    )
+    parser.add_argument(
+        "--plateau-patience",
+        type=int,
+        default=3,
+        help="#evals without improvement before LR is reduced (ReduceLROnPlateau).",
+    )
+    parser.add_argument(
+        "--plateau-factor",
+        type=float,
+        default=0.5,
+        help="LR decay factor for ReduceLROnPlateau.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop after this many evals without improvement (0=disabled).",
     )
     return parser.parse_args()
 
@@ -1059,6 +1124,11 @@ def main():
             vis_max_per_label=args.vis_max_per_label,
             snapshot_splits=snapshot_splits,
             wandb_run=wandb_run,
+            grad_clip=args.grad_clip,
+            scheduler_type=args.scheduler,
+            plateau_patience=args.plateau_patience,
+            plateau_factor=args.plateau_factor,
+            early_stop_patience=args.early_stop_patience,
         )
     finally:
         if wandb_run is not None:
