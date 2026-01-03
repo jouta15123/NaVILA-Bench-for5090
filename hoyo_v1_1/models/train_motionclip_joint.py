@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 import random
@@ -49,6 +50,11 @@ try:
     import wandb  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - optional dependency
     wandb = None  # type: ignore[assignment]
+
+try:
+    from sklearn.metrics import silhouette_score
+except Exception:  # pragma: no cover - optional dependency
+    silhouette_score = None
 
 # MotionCLIP imports
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -338,11 +344,155 @@ def evaluate_dataset(
         
     if total_samples == 0:
         return {"acc@1": 0.0, "acc@3": 0.0, "mpjpe": 0.0}
-        
+
     return {
         "acc@1": total_correct_1 / total_samples,
         "acc@3": total_correct_3 / total_samples,
         "mpjpe": total_mpjpe / total_samples,
+    }
+
+def _normalize_np(x: np.ndarray) -> np.ndarray:
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-8)
+
+
+def _text_to_motion_metrics(
+    z_text: np.ndarray,
+    z_motion: np.ndarray,
+    labels_motion: np.ndarray,
+    ks: tuple,
+):
+    sims = z_text @ z_motion.T  # (K, N)
+    ks = sorted(set(ks))
+    hits = {k: 0 for k in ks}
+    ranks = []
+    valid_queries = 0
+
+    for k in range(z_text.shape[0]):
+        pos_idx = np.where(labels_motion == k)[0]
+        if len(pos_idx) == 0:
+            continue
+        valid_queries += 1
+        order = np.argsort(-sims[k])  # (N,)
+        inv_rank = np.empty_like(order)
+        inv_rank[order] = np.arange(order.size)
+        best_rank = int(inv_rank[pos_idx].min())
+        ranks.append(best_rank + 1)
+        for kk in ks:
+            if best_rank < kk:
+                hits[kk] += 1
+
+    metrics = {f"R@{kk}": hits[kk] / max(valid_queries, 1) for kk in ks}
+    medr = float(np.median(ranks)) if ranks else None
+    return metrics, medr, valid_queries
+
+
+def _motion_to_text_metrics(
+    z_text: np.ndarray,
+    z_motion: np.ndarray,
+    labels_motion: np.ndarray,
+    ks: tuple,
+):
+    sims = z_motion @ z_text.T  # (N, K)
+    order = np.argsort(-sims, axis=1)
+    ranks = np.argsort(order, axis=1)
+    correct_rank = ranks[np.arange(labels_motion.shape[0]), labels_motion] + 1
+
+    ks = sorted(set(ks))
+    metrics = {f"R@{kk}": float(np.mean(correct_rank <= kk)) for kk in ks}
+    medr = float(np.median(correct_rank)) if correct_rank.size > 0 else None
+    return metrics, medr, int(labels_motion.shape[0])
+
+
+def _compute_silhouette(z_m: np.ndarray, labels_idx: np.ndarray):
+    if silhouette_score is None:
+        return None
+    if z_m.shape[0] < 2:
+        return None
+    if len(np.unique(labels_idx)) < 2:
+        return None
+    return float(silhouette_score(z_m, labels_idx))
+
+
+@torch.no_grad()
+def evaluate_retrieval_metrics(
+    dataset: HoyoInstructionDataset,
+    model: nn.Module,
+    sem_proj: nn.Module,
+    sem_emb: torch.Tensor,
+    device: torch.device,
+    labels=None,
+    batch_size: int = 64,
+    ks: tuple = (1, 3, 5),
+    compute_silhouette: bool = True,
+):
+    """
+    Compute retrieval metrics (R@K, MedR) and silhouette score for contrastive learning evaluation.
+    """
+    model.eval()
+    sem_proj.eval()
+
+    if labels is None:
+        labels = INSTRUCTION_ONOMATOPEIA
+    labels = list(labels)
+    sem_emb = sem_emb.to(device)
+
+    z_s_cls = sem_proj(sem_emb)
+    z_s_cls = F.normalize(z_s_cls, dim=-1).detach().cpu().numpy()
+
+    zs = []
+    ys = []
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    for x_batch, y_batch in dataloader:
+        x_batch = x_batch.permute(0, 2, 3, 1).to(device)
+        y_batch = y_batch.to(device)
+
+        B, _, _, Tcur = x_batch.shape
+        mask = torch.ones((B, Tcur), dtype=torch.bool, device=device)
+        lengths = torch.full((B,), Tcur, dtype=torch.long, device=device)
+
+        batch = {
+            "x": x_batch,
+            "mask": mask,
+            "lengths": lengths,
+            "y": y_batch,
+        }
+
+        out = model(batch)
+        z_m = out["mu"]
+        z_m = F.normalize(z_m, dim=-1).detach().cpu().numpy()
+
+        zs.append(z_m)
+        ys.append(y_batch.detach().cpu().numpy())
+
+    if not zs:
+        return {
+            "t2m": {},
+            "t2m_medr": None,
+            "t2m_queries": 0,
+            "m2t": {},
+            "m2t_medr": None,
+            "m2t_queries": 0,
+            "silhouette": None,
+        }
+
+    z_m_all = np.concatenate(zs, axis=0)
+    labels_idx = np.concatenate(ys, axis=0).astype(int)
+
+    z_m_all = _normalize_np(z_m_all)
+    z_s_cls = _normalize_np(z_s_cls)
+
+    t2m, t2m_medr, t2m_q = _text_to_motion_metrics(z_s_cls, z_m_all, labels_idx, ks)
+    m2t, m2t_medr, m2t_q = _motion_to_text_metrics(z_s_cls, z_m_all, labels_idx, ks)
+    sil = _compute_silhouette(z_m_all, labels_idx) if compute_silhouette else None
+
+    return {
+        "t2m": t2m,
+        "t2m_medr": t2m_medr,
+        "t2m_queries": t2m_q,
+        "m2t": m2t,
+        "m2t_medr": m2t_medr,
+        "m2t_queries": m2t_q,
+        "silhouette": sil,
     }
 
 
@@ -491,6 +641,9 @@ def train_joint(
     plateau_patience: int = 3,
     plateau_factor: float = 0.5,
     early_stop_patience: int = 0,
+    retrieval_ks: tuple = (1, 3, 5),
+    eval_retrieval: bool = True,
+    eval_silhouette: bool = True,
 ):
     os.makedirs(out_dir, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
@@ -823,17 +976,89 @@ def train_joint(
         # --- Evaluation ---
         if step % eval_interval == 0 or step == steps:
             print(f"Evaluating on Test Set...")
-            metrics = evaluate_dataset(test_dataset, model, sem_proj, sem_emb, device, labels=labels)
+            metrics = evaluate_dataset(
+                test_dataset,
+                model,
+                sem_proj,
+                sem_emb,
+                device,
+                labels=labels,
+                batch_size=batch_size,
+            )
             
             test_acc = metrics["acc@1"]
             print(f"  [TEST] Acc@1: {metrics['acc@1']:.3f} | Acc@3: {metrics['acc@3']:.3f} | MPJPE: {metrics['mpjpe']:.4f}")
-            
+
             if wandb_run is not None:
                 wandb_run.log({
                     "test/acc_top1": metrics["acc@1"],
                     "test/acc_top3": metrics["acc@3"],
                     "test/mpjpe": metrics["mpjpe"],
                 }, step=step)
+
+
+            if eval_retrieval:
+                retrieval = evaluate_retrieval_metrics(
+                    test_dataset,
+                    model,
+                    sem_proj,
+                    sem_emb,
+                    device,
+                    labels=labels,
+                    batch_size=batch_size,
+                    ks=retrieval_ks,
+                    compute_silhouette=eval_silhouette,
+                )
+
+                print("  [Retrieval: Text -> Motion]")
+                print(f"    queries: {retrieval['t2m_queries']}")
+                for kk in sorted(retrieval_ks):
+                    print(f"    R@{kk}: {retrieval['t2m'].get(f'R@{kk}', 0.0):.4f}")
+                if retrieval["t2m_medr"] is not None:
+                    print(f"    MedR: {retrieval['t2m_medr']:.1f}")
+
+                print("  [Retrieval: Motion -> Text]")
+                print(f"    queries: {retrieval['m2t_queries']}")
+                for kk in sorted(retrieval_ks):
+                    print(f"    R@{kk}: {retrieval['m2t'].get(f'R@{kk}', 0.0):.4f}")
+                if retrieval["m2t_medr"] is not None:
+                    print(f"    MedR: {retrieval['m2t_medr']:.1f}")
+
+                if eval_silhouette:
+                    if retrieval["silhouette"] is None:
+                        print("  [Silhouette] skipped (insufficient labels or sklearn missing)")
+                    else:
+                        print(f"  [Silhouette] {retrieval['silhouette']:.4f}")
+
+                # Save retrieval metrics to JSONL for cross-run comparison
+                metrics_path = out_dir / "retrieval_metrics.jsonl"
+                record = {
+                    "step": step,
+                    "t2m": retrieval["t2m"],
+                    "t2m_medr": retrieval["t2m_medr"],
+                    "t2m_queries": retrieval["t2m_queries"],
+                    "m2t": retrieval["m2t"],
+                    "m2t_medr": retrieval["m2t_medr"],
+                    "m2t_queries": retrieval["m2t_queries"],
+                    "silhouette": retrieval["silhouette"],
+                    "retrieval_ks": list(sorted(retrieval_ks)),
+                }
+                with open(metrics_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+                if wandb_run is not None:
+                    log_payload = {}
+                    for kk in sorted(retrieval_ks):
+                        log_payload[f"test/t2m_r@{kk}"] = retrieval["t2m"].get(f"R@{kk}", 0.0)
+                        log_payload[f"test/m2t_r@{kk}"] = retrieval["m2t"].get(f"R@{kk}", 0.0)
+                    if retrieval["t2m_medr"] is not None:
+                        log_payload["test/t2m_medr"] = retrieval["t2m_medr"]
+                    if retrieval["m2t_medr"] is not None:
+                        log_payload["test/m2t_medr"] = retrieval["m2t_medr"]
+                    if eval_silhouette and retrieval["silhouette"] is not None:
+                        log_payload["test/silhouette"] = retrieval["silhouette"]
+                    if log_payload:
+                        wandb_run.log(log_payload, step=step)
 
             # Save BEST model based on Test Acc
             if test_acc > best_test_acc:
@@ -972,6 +1197,29 @@ def parse_args():
         default=0,
         help="Stop after this many evals without improvement (0=disabled).",
     )
+    parser.add_argument(
+        "--view-filter",
+        type=str,
+        choices=["front", "back"],
+        default=None,
+        help="Filter HOYO samples by view type ('front' or 'back'). Default: use all.",
+    )
+    parser.add_argument(
+        "--no-retrieval-eval",
+        action="store_true",
+        help="Skip retrieval metrics (R@K/MedR/Silhouette) during evaluation.",
+    )
+    parser.add_argument(
+        "--retrieval-ks",
+        type=str,
+        default="1,3,5",
+        help="Comma-separated K values for retrieval evaluation.",
+    )
+    parser.add_argument(
+        "--no-silhouette",
+        action="store_true",
+        help="Skip silhouette score computation.",
+    )
     return parser.parse_args()
 
 
@@ -1015,11 +1263,12 @@ def main():
     
     # Load Data (fine-grained labels)
     dataset = HoyoInstructionDataset(
-        hoyo_root, 
-        INSTRUCTION_ONOMATOPEIA, 
-        target_len=target_len, 
-        is_train=True, 
-        use_aug=args.use_aug
+        hoyo_root,
+        INSTRUCTION_ONOMATOPEIA,
+        target_len=target_len,
+        is_train=True,
+        use_aug=args.use_aug,
+        view_filter=args.view_filter,
     )
     
     # Split Data (80% Train, 20% Test)
@@ -1129,6 +1378,9 @@ def main():
             plateau_patience=args.plateau_patience,
             plateau_factor=args.plateau_factor,
             early_stop_patience=args.early_stop_patience,
+            retrieval_ks=tuple(int(k) for k in args.retrieval_ks.split(",") if k.strip()),
+            eval_retrieval=not args.no_retrieval_eval,
+            eval_silhouette=not args.no_silhouette,
         )
     finally:
         if wandb_run is not None:

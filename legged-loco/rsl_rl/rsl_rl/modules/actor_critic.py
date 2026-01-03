@@ -182,11 +182,15 @@ class ResidualActorCritic(ActorCritic):
             try:
                 loaded_dict = torch.load(base_policy_checkpoint, map_location=kwargs.get("device", "cpu"))
                 # rsl_rl saves "model_state_dict" usually
-                if "model_state_dict" in loaded_dict:
-                    self.base_policy.load_state_dict(loaded_dict["model_state_dict"])
+                state_dict = loaded_dict["model_state_dict"] if "model_state_dict" in loaded_dict else loaded_dict
+                load_result = self.base_policy.load_state_dict(state_dict, strict=False)
+                if load_result.missing_keys or load_result.unexpected_keys:
+                    print(
+                        "Base Policy Loaded with mismatched keys. "
+                        f"Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}"
+                    )
                 else:
-                    self.base_policy.load_state_dict(loaded_dict)
-                print("Base Policy Loaded.")
+                    print("Base Policy Loaded.")
             except Exception as e:
                 print(f"Failed to load base policy: {e}")
                 self.base_policy = None
@@ -222,36 +226,34 @@ class ResidualActorCritic(ActorCritic):
             print("No base policy checkpoint provided. Training from scratch (Residual=Total).")
 
     def act(self, observations, **kwargs):
+        """
+        Sample action from the policy.
+
+        For residual policy: action = base_mean + residual_scale * residual_sample
+        The distribution is updated to reflect the combined policy for correct log_prob computation.
+        """
         # observations: [base_obs, style_latent]
-        
-        # 1. Compute Residual Action (from self.actor)
         self.update_distribution(observations)
-        residual_action = self.distribution.sample()
-        
-        # 2. Compute Base Action
+        residual_mean = self.distribution.mean
+        # Use rsample to preserve gradients if needed
+        residual_sample = self.distribution.rsample()
+
         if self.base_policy is not None:
             obs_base = observations[:, :-self.style_dim]
             base_mean = self.base_policy.act_inference(obs_base)
-            
-            # Combine
+
             # action = base + scale * residual
-            # But self.distribution is around residual_mean.
-            # We want sampled action to be around (base + scale * residual).
-            # So we shift the sample? Or shift the mean?
-            # self.distribution is Normal(residual_mean, std)
-            # We want Normal(base + scale * residual, std)
-            
-            # Let's adjust the distribution mean
-            residual_mean = self.distribution.mean
-            combined_mean = base_mean + self.residual_scale * residual_mean
-            
-            # Re-create distribution for log_prob computation if needed?
-            # act() returns sample.
-            # We assume std is part of residual policy training (self.std).
-            self.distribution = Normal(combined_mean, self.std)
-            return self.distribution.sample()
-            
-        return residual_action
+            action = base_mean + self.residual_scale * residual_sample
+
+            # Update distribution for correct log_prob computation
+            # Both mean and std are scaled by residual_scale
+            self.distribution = Normal(
+                base_mean + self.residual_scale * residual_mean,
+                self.std * self.residual_scale,
+            )
+            return action
+
+        return residual_sample
 
     def act_inference(self, observations):
         residual_mean = self.actor(observations)

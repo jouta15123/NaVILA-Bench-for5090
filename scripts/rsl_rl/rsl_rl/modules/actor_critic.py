@@ -185,20 +185,34 @@ class ResidualActorCritic(ActorCritic):
             print("No base policy checkpoint provided. Training from scratch (Residual only).")
 
     def act(self, observations, **kwargs):
+        """
+        Sample action from the policy.
+
+        For residual policy: action = base_mean + residual_scale * residual_sample
+        The distribution is updated to reflect the combined policy for correct log_prob computation.
+        """
         # observations: [base_obs, style_latent]
         self.update_distribution(observations)
-        residual_action = self.distribution.sample()
+        residual_mean = self.distribution.mean
+        # Use rsample to preserve gradients if needed
+        residual_sample = self.distribution.rsample()
 
         if self.base_policy is not None:
             obs_base = observations[:, :-self.style_dim]
             base_mean = self.base_policy.act_inference(obs_base)
 
-            residual_mean = self.distribution.mean
-            combined_mean = base_mean + self.residual_scale * residual_mean
-            self.distribution = Normal(combined_mean, self.std)
-            return self.distribution.sample()
+            # action = base + scale * residual
+            action = base_mean + self.residual_scale * residual_sample
 
-        return residual_action
+            # Update distribution for correct log_prob computation
+            # Both mean and std are scaled by residual_scale
+            self.distribution = Normal(
+                base_mean + self.residual_scale * residual_mean,
+                self.std * self.residual_scale,
+            )
+            return action
+
+        return residual_sample
 
     def act_inference(self, observations):
         residual_mean = self.actor(observations)

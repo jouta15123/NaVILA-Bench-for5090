@@ -110,6 +110,23 @@ parser.add_argument("--use_cnn", action="store_true", default=None, help="Name o
 parser.add_argument("--arm_fixed", action="store_true", default=False, help="Fix the robot's arms.")
 parser.add_argument("--use_rnn", action="store_true", default=False, help="Use RNN in the actor-critic model.")
 parser.add_argument("--history_length", default=0, type=int, help="Length of history buffer.")
+parser.add_argument("--style_weight", type=float, default=None, help="Override style reward weight.")
+parser.add_argument("--style_beta_text", type=float, default=None, help="Override style reward beta_text.")
+parser.add_argument("--style_beta_centroid", type=float, default=None, help="Override style reward beta_centroid.")
+parser.add_argument("--style_ramp_steps", type=int, default=None, help="Override style reward ramp steps.")
+parser.add_argument(
+    "--terrain",
+    type=str,
+    default="flat",
+    choices=["flat", "rough", "keep"],
+    help="Override terrain type for training. flat=plane, rough=use config generator, keep=no override.",
+)
+parser.add_argument(
+    "--style_list",
+    type=str,
+    default=None,
+    help="Comma-separated style list to sample from (overrides INSTRUCTION_ONOMATOPEIA).",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -157,6 +174,56 @@ def main():
     # )
     env_cfg = parse_env_cfg(args_cli.task, num_envs=args_cli.num_envs)
     agent_cfg: RslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    
+    # Optional style overrides for experiments
+    if hasattr(env_cfg, "rewards") and hasattr(env_cfg.rewards, "style_tracking"):
+        if args_cli.style_weight is not None:
+            env_cfg.rewards.style_tracking.weight = args_cli.style_weight
+        if args_cli.style_beta_text is not None:
+            env_cfg.rewards.style_tracking.params["beta_text"] = args_cli.style_beta_text
+        if args_cli.style_beta_centroid is not None:
+            env_cfg.rewards.style_tracking.params["beta_centroid"] = args_cli.style_beta_centroid
+        if args_cli.style_ramp_steps is not None:
+            env_cfg.rewards.style_tracking.params["ramp_steps"] = args_cli.style_ramp_steps
+    if args_cli.style_list is not None and hasattr(env_cfg, "commands"):
+        styles = [s.strip() for s in args_cli.style_list.split(",") if s.strip()]
+        if len(styles) == 0:
+            raise ValueError("style_list is empty after parsing. Provide at least one style.")
+        if hasattr(env_cfg.commands, "style_command"):
+            env_cfg.commands.style_command.styles = styles
+
+    # Terrain override (default: flat) for style-focused training
+    if args_cli.terrain != "keep":
+        if not hasattr(env_cfg, "scene") or not hasattr(env_cfg.scene, "terrain"):
+            print(f"[WARN] Terrain override requested but env_cfg has no scene.terrain (task={args_cli.task}).")
+        else:
+            if args_cli.terrain == "flat":
+                current_type = getattr(env_cfg.scene.terrain, "terrain_type", None)
+                if current_type not in (None, "generator", "plane"):
+                    print(
+                        "[WARN] Terrain override 'flat' skipped for non-generator terrain type: "
+                        f"{current_type}. Use --terrain=keep to suppress this warning."
+                    )
+                else:
+                    env_cfg.scene.terrain.terrain_type = "plane"
+                    env_cfg.scene.terrain.terrain_generator = None
+                    env_cfg.scene.terrain.max_init_terrain_level = None
+                    if hasattr(env_cfg, "curriculum") and getattr(env_cfg.curriculum, "terrain_levels", None) is not None:
+                        env_cfg.curriculum.terrain_levels = None
+                    # Switch reset event to uniform when flat patches are not available.
+                    if hasattr(env_cfg, "events") and hasattr(env_cfg.events, "reset_base"):
+                        try:
+                            import omni.isaac.leggedloco.leggedloco.mdp as mdp
+
+                            env_cfg.events.reset_base.func = mdp.reset_root_state_uniform
+                        except Exception as exc:
+                            print(f"[WARN] Failed to override reset_base for flat terrain: {exc}")
+                    print("[INFO] Terrain override: flat (plane).")
+            elif args_cli.terrain == "rough":
+                # Keep the default generator-based terrain from the config.
+                print("[INFO] Terrain override: rough (use config generator).")
+            else:
+                raise ValueError(f"Unsupported terrain option: {args_cli.terrain}")
 
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)

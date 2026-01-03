@@ -59,22 +59,33 @@ class HoyoInstructionDataset(Dataset):
       4. 標準化 (Standardization) -> apply_normalization_from_stats で適用
     """
 
-    def __init__(self, root: Path, target_labels: List[str], target_len: int = 60, is_train: bool = True, use_aug: bool = False):
+    def __init__(
+        self,
+        root: Path,
+        target_labels: List[str],
+        target_len: int = 60,
+        is_train: bool = True,
+        use_aug: bool = False,
+        view_filter: str = None,
+        normalize_back_to_front: bool = True,
+    ):
         self.root = root
         self.target_labels = set(target_labels)
         self.target_len = target_len
         self.is_train = is_train
         self.use_aug = use_aug # Augmentation flag (only effective if is_train=True)
+        self.view_filter = view_filter  # "front", "back", or None (all)
+        self.normalize_back_to_front = normalize_back_to_front
 
         # ラベルごとの生データリスト（長さは可変、身長正規化済み）
         self.samples_by_label: Dict[str, List[np.ndarray]] = {lab: [] for lab in target_labels}
 
         # インデックスアクセスのためのリスト: [(label, index_in_label_list), ...]
         self._indices: List[Tuple[str, int]] = []
-        
+
         # ラベル文字列からIDへのマッピング（評価・学習用）
         self.label_to_id = {lab: i for i, lab in enumerate(INSTRUCTION_ONOMATOPEIA)}
-        
+
         # 正規化用統計量 (normalize_dataset でセットされる)
         self.mean = None
         self.std = None
@@ -90,20 +101,28 @@ class HoyoInstructionDataset(Dataset):
             inst = data["annotation"]["instruction"]
             if inst not in self.target_labels:
                 continue
+            # viewフィルタリング
+            if view_filter is not None and data.get("view") != view_filter:
+                continue
             rel_path = data["path"]  # e.g. "data/100.pickle"
             pkl_path = root / rel_path
             if not pkl_path.exists():
                 continue
-            
+
             # ロードして身長だけ正規化（長さはそのまま）
             coords = self._load_raw_and_scale(pkl_path)
-            
+            # Back viewをfrontに正規化（常に左右反転＋関節swap）
+            if self.normalize_back_to_front and data.get("view") == "back":
+                coords = self._apply_horizontal_flip(coords)
+
             # リストに追加し、インデックスを記録
             current_idx = len(self.samples_by_label[inst])
             self.samples_by_label[inst].append(coords)
             self._indices.append((inst, current_idx))
 
-        print(f"Loaded HOYO samples (train={self.is_train}):")
+        view_info = f", view={view_filter}" if view_filter else ""
+        norm_info = ", back->front" if self.normalize_back_to_front else ""
+        print(f"Loaded HOYO samples (train={self.is_train}{view_info}{norm_info}):")
         for lab in target_labels:
             print(f"  {lab}: {len(self.samples_by_label[lab])} samples")
 
@@ -235,6 +254,19 @@ class HoyoInstructionDataset(Dataset):
             centered = (centered - self.mean) / self.std
 
         return centered.astype(np.float32)
+
+    @staticmethod
+    def _apply_horizontal_flip(coords: np.ndarray) -> np.ndarray:
+        """左右反転 + 関節入れ替え（HOYO [x, y] 前提）。"""
+        flipped = coords.copy()
+        flipped[..., 0] *= -1
+        # HOYO joints swap pairs
+        pairs = [(2,5), (3,6), (4,7), (8,11), (9,12), (10,13)]
+        for r, l in pairs:
+            tmp = flipped[:, r, :].copy()
+            flipped[:, r, :] = flipped[:, l, :]
+            flipped[:, l, :] = tmp
+        return flipped
 
     def get_sample(self, label: str) -> np.ndarray:
         """

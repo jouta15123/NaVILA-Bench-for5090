@@ -52,7 +52,7 @@ class H1VisionRoughPPORunnerCfg(H1RoughPPORunnerCfg):
     experiment_name = "h1_vision_rough"
     # Enable WandB logging based on user request (Zenn article)
     logger = "wandb"
-    wandb_project = "navila-bench"
+    wandb_project = "StyleWalker_RL"
     wandb_tags = ["staged"] # Tag for important experiments as per article
 
     policy = CustomPpoActorCriticCfg(
@@ -257,6 +257,7 @@ class ObservationsCfg:
             params={"sensor_cfg": SceneEntityCfg("height_scanner")},
             clip=(-1.0, 1.0),
         )
+        style = ObsTerm(func=mdp.style_latents)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -378,7 +379,7 @@ class CustomH1Rewards(H1Rewards):
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=3.0,  # Increased from 1.0 to balance with velocity tracking
-        params={"command_name": "style_command", "beta_text": 0.5, "beta_centroid": 0.5},
+        params={"command_name": "style_command", "beta_text": 0.5, "beta_centroid": 0.5, "ramp_steps": 5000},
     )
 ##
 # Commands

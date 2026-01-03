@@ -5,7 +5,6 @@ import json # Added json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.functional as F
 import numpy as np
 import isaaclab.utils.math as math_utils
 from pathlib import Path
@@ -44,12 +43,21 @@ class StyleModule:
     Module to handle Onomatopoeia style encoding and reward computation for NaVILA.
     Maintains a buffer of motion history for reward computation.
     """
-    def __init__(self, device: str = "cuda", run_name: str = "sarashina_full_fixed", num_envs: int = 1):
+    def __init__(
+        self,
+        device: str = "cuda",
+        run_name: str = "sarashina_full_fixed",
+        num_envs: int = 1,
+        coord_mode: str = "legacy_xz_yaw",
+    ):
         self.device = torch.device(device)
         self.run_name = run_name
         self.root_dir = NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / run_name
         self.num_envs = num_envs
         self.buffer_len = 60
+        self.coord_mode = coord_mode
+        if self.coord_mode not in ("legacy_xz_yaw", "hoyo_front"):
+            raise ValueError(f"Unsupported coord_mode: {self.coord_mode}")
         
         # Load Checkpoints
         self._load_models()
@@ -154,10 +162,12 @@ class StyleModule:
             self.label_to_id = {}
 
     def _load_norm_stats(self):
-        self.norm_path = self.root_dir.parent.parent / "data" / "normalization_stats.json"
+        # Priority: run-specific > global joint_training_results > data directory
+        self.norm_path = self.root_dir / "normalization_stats.json"
         if not self.norm_path.exists():
-             # Try joint_training_results/normalization_stats.json
-             self.norm_path = NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / "normalization_stats.json"
+            self.norm_path = NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / "normalization_stats.json"
+        if not self.norm_path.exists():
+            self.norm_path = self.root_dir.parent.parent / "data" / "normalization_stats.json"
         
         self.mean = None
         self.std = None
@@ -366,104 +376,174 @@ class StyleModule:
         # Increment warmup counter (capped at warmup_frames)
         self.warmup_counter = torch.clamp(self.warmup_counter + 1, max=self.warmup_frames)
 
-    def encode_buffer(self):
+    @torch.no_grad()
+    def _prepare_centered_2d(
+        self,
+        apply_yaw_correction: bool = False,
+        coord_mode: str | None = None,
+    ) -> torch.Tensor:
         """
-        Encodes the current buffer into style latent.
-        Applies Centering and Normalization as in HOYO dataset.
-        Aligns motion to Frame 0 heading.
+        Prepare motion buffer in the same 2D format used for MotionCLIP/HOYO.
+
+        HOYO前処理に準拠:
+        1. 初期フレームの重心でセンタリング
+        2. 3D→2D投影: [Y(左右), Z(上下)] → [x, y] (HOYO正面視点座標系)
+        3. 身長正規化 (頭〜足の距離)
+        4. 標準化 (mean/std)
+
+        注意: HOYOは正面視点（frontal view）で撮影されているため、
+              H1の[Y_lat, Z_up]がHOYOの[x, y]に対応する。
+              - HOYO x（水平）= H1 Y軸（左右方向）
+              - HOYO y（垂直）= H1 Z軸（上下方向）
+              正規化統計(normalization_stats.json)はYaw補正なしで計算されているため、
+              apply_yaw_correction=Falseがデフォルト。
+
+        Args:
+            apply_yaw_correction: Yaw補正を適用するかどうか（hoyo_frontモードのみ有効）。
+            coord_mode: "legacy_xz_yaw" or "hoyo_front". If None, uses self.coord_mode.
+
+        Returns:
+            (B, T, 14, 2) shaped tensor in [x, y] order matching HOYO format.
         """
-        # 1. Align Translation (Center to Frame 0 CoM)
-        # We use Frame 0 of the window as the reference origin.
-        # But CoM of Frame 0 is better.
-        com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1) # (B, 1, 1, 3)
+        coord_mode = coord_mode or self.coord_mode
+        if coord_mode == "legacy_xz_yaw":
+            # Legacy: XZ sagittal projection with yaw correction (pre-2025-12-16 behavior)
+            # 1. Frame 0のCoMでセンタリング
+            com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            centered_3d = self.motion_buffer - com_0
+
+            # 2. Align rotation by -Yaw of frame 0 (legacy)
+            yaw_0 = self.heading_buffer[:, 0]  # (B,)
+            c = torch.cos(yaw_0).view(-1, 1, 1, 1)
+            s = torch.sin(yaw_0).view(-1, 1, 1, 1)
+
+            x = centered_3d[..., 0:1]
+            y = centered_3d[..., 1:2]
+            z = centered_3d[..., 2:3]
+
+            x_rot = x * c + y * s
+            z_rot = z
+
+            # 3. Project to 2D (Z, X) order
+            centered = torch.cat([z_rot, x_rot], dim=-1)
+
+            # 4. Height scaling (3D head-feet distance)
+            head_pos = self.motion_buffer[:, :, 0, :]  # (B, T, 3)
+            r_ankle = self.motion_buffer[:, :, 10, :]
+            l_ankle = self.motion_buffer[:, :, 13, :]
+            feet_mid = 0.5 * (r_ankle + l_ankle)
+            heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
+            scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
+            scale = torch.maximum(scale, torch.tensor(1.0, device=self.device))
+            scale_bc = scale.view(-1, 1, 1, 1)
+            centered = centered / scale_bc
+
+            # 5. Normalize (mean/std)
+            if self.mean is not None:
+                if self.mean.numel() == 2:
+                    mean = self.mean.view(1, 1, 1, 2)
+                    std = self.std.view(1, 1, 1, 2)
+                else:
+                    mean = self.mean.view(1, 1, 14, 2)
+                    std = self.std.view(1, 1, 14, 2)
+                centered = (centered - mean) / (std + 1e-6)
+
+            return centered
+
+        # Default: HOYO frontal projection
+        # 1. Frame 0のCoMでセンタリング
+        com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
         centered_3d = self.motion_buffer - com_0
-        
-        # 2. Align Rotation (Rotate by -Yaw of Frame 0)
-        yaw_0 = self.heading_buffer[:, 0] # (B,)
-        
-        # Rotate around Z axis (Assuming Z is up in World)
-        # x' = x cos(-yaw) - y sin(-yaw)
-        # y' = x sin(-yaw) + y cos(-yaw)
-        # z' = z
-        # Since we rotate by -yaw: cos(-a)=cos(a), sin(-a)=-sin(a)
-        c = torch.cos(yaw_0).view(-1, 1, 1, 1)
-        s = torch.sin(yaw_0).view(-1, 1, 1, 1)
-        
-        x = centered_3d[..., 0:1]
-        y = centered_3d[..., 1:2]
-        z = centered_3d[..., 2:3]
-        
-        # Inverse rotation (Rotate World -> Local)
-        # To make "North" (+Y) become "East" (+X)?
-        # If Yaw=90 (North), we want to rotate by -90.
-        # x_local = x * cos(yaw) + y * sin(yaw)
-        # y_local = -x * sin(yaw) + y * cos(yaw)
-        # Let's verify: P=(0,1) (North), Yaw=90.
-        # x' = 0 + 1*1 = 1. y' = 0 + 0 = 0. -> (1,0) (East). Correct.
-        
-        x_rot = x * c + y * s
-        # y_rot = -x * s + y * c # We don't strictly need Y for 2D projection if projecting to XZ
-        z_rot = z
-        
-        # 3. Project to 2D (Sagittal Plane X-Z)
-        # Logic: After rotation, X is forward, Z is up.
-        # "normalization_stats.json" has std=[0.1, 0.29].
-        # Since forward motion (X) has much larger variance than vertical (Z),
-        # and std[1] > std[0], we infer expected order is [LowVar, HighVar] -> [Z, X].
-        # Current H1 X (Forward) -> 1.0m+ variance. H1 Z (Up) -> 0.1m variance.
-        # So we MUST map X -> Index 1, Z -> Index 0.
-        centered_2d = torch.cat([z_rot, x_rot], dim=-1) # (B, T, 14, 2)
-        
-        centered = centered_2d
 
-        # Debug Stats (Transient)
-        if torch.rand(1).item() < 0.005:
-            with torch.no_grad():
-                # Print raw ranges before normalization to check assumptions
-                x_range = x_rot.max() - x_rot.min()
-                z_range = z_rot.max() - z_rot.min()
-                print(f"[DEBUG EncBuffer] RawRanges X(Fwd)={x_range:.2f}, Z(Up)={z_range:.2f}")
+        # 2. (Optional) Yaw補正 - デフォルトはOFF（HOYO正規化統計に合わせる）
+        if apply_yaw_correction:
+            yaw_0 = self.heading_buffer[:, 0]  # (B,)
+            c = torch.cos(-yaw_0).view(-1, 1, 1, 1)
+            s = torch.sin(-yaw_0).view(-1, 1, 1, 1)
 
-        # 4. Height Scaling (NEW)
-        # HOYO scale: mean(norm(Head - FeetMid))
-        # We calculate this from the Motion Buffer (B, T, 14, 3) *before* rotation/projection to be safe, 
-        # but 2D projection is X-Z (Sagittal) and H1 is standing up (Z), so 2D distance is also good approx if side-view.
-        # Use 3D distance for accuracy.
-        # Head: 0, R-Ankle: 10, L-Ankle: 13
-        
-        head_pos = self.motion_buffer[:, :, 0, :] # (B, T, 3)
-        r_ankle = self.motion_buffer[:, :, 10, :]
-        l_ankle = self.motion_buffer[:, :, 13, :]
+            x = centered_3d[..., 0:1]
+            y = centered_3d[..., 1:2]
+            z = centered_3d[..., 2:3]
+
+            x_rot = x * c - y * s
+            y_rot = x * s + y * c
+            centered_3d = torch.cat([x_rot, y_rot, z], dim=-1)
+
+        # 3. 3D→2D投影: H1[Y(左右), Z(上下)] → HOYO正面視点 [x, y]
+        # HOYO座標系（画像座標系、frontビュー、swap後）:
+        #   - HOYO x: 右向き正（画像の水平方向）
+        #   - HOYO y: 下向き正（画像の垂直方向）
+        # H1座標系:
+        #   - H1 Y: 左向き正（被写体の左が正）
+        #   - H1 Z: 上向き正
+        # マッピング（両軸とも符号反転が必要）:
+        #   - HOYO x = -H1 Y（右向き正 ← 左向き正）
+        #   - HOYO y = -H1 Z（下向き正 ← 上向き正）
+        y_lat = centered_3d[..., 1:2]  # H1 Y: 左向き正
+        z_up = centered_3d[..., 2:3]   # H1 Z: 上向き正
+        centered = torch.cat([-y_lat, -z_up], dim=-1)
+
+        # 4. 身長正規化（HOYOと同じ方法: 頭〜足の距離で正規化）
+        head_pos = centered[:, :, 0, :]   # (B, T, 2) - head
+        r_ankle = centered[:, :, 10, :]   # (B, T, 2) - right ankle
+        l_ankle = centered[:, :, 13, :]   # (B, T, 2) - left ankle
         feet_mid = 0.5 * (r_ankle + l_ankle)
-        
-        heights = torch.norm(head_pos - feet_mid, dim=-1) # (B, T)
-        scale = heights.mean(dim=1, keepdim=True) # (B, 1) to broadcast over T
-        
-        # Avoid division by zero
-        scale = torch.maximum(scale, torch.tensor(1.0, device=self.device))
-        
-        # Broadcast scale to (B, 1, 1, 1) for (B, T, 14, 2)
+
+        heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
+        scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
+        scale = torch.maximum(scale, torch.tensor(1e-6, device=self.device))
         scale_bc = scale.view(-1, 1, 1, 1)
         centered = centered / scale_bc
 
-        # 5. Normalize
+        # 5. 標準化 (mean/std) - HOYO正規化統計を使用
         if self.mean is not None:
-            # Handle Global (2,) or Local (14, 2) stats
             if self.mean.numel() == 2:
-                # Global stats: [mean_x, mean_y]
-                # centering is (B, T, 14, 2). 
-                # mean needs to broadcast to (1, 1, 1, 2)
                 mean = self.mean.view(1, 1, 1, 2)
                 std = self.std.view(1, 1, 1, 2)
             else:
-                # Local stats: (14, 2)
                 mean = self.mean.view(1, 1, 14, 2)
                 std = self.std.view(1, 1, 14, 2)
-                
-            centered = (centered - mean) / (std + 1e-6) # Add epsilon to avoid div by zero
-             
-        # 3. MotionCLIP
-        x = centered.permute(0, 2, 3, 1) # (B, 14, 2, 60)
+            centered = (centered - mean) / (std + 1e-6)
+
+        return centered
+
+    @torch.no_grad()
+    def get_processed_buffer_2d(self) -> torch.Tensor:
+        """
+        Expose the current motion buffer in processed 2D format (B, T, 14, 2).
+        """
+        return self._prepare_centered_2d(coord_mode=self.coord_mode)
+
+    @torch.no_grad()
+    def get_buffer_for_hoyo_comparison(self) -> torch.Tensor:
+        """
+        HOYO誤差計算用に、HOYOデータセットと同じ前処理を適用したバッファを返す。
+
+        _prepare_centered_2d()と同一の処理を使用し、座標系の一貫性を保証する。
+
+        Returns:
+            (B, T, 14, 2) shaped tensor in [x, y] order matching HOYO format.
+        """
+        return self._prepare_centered_2d(apply_yaw_correction=False, coord_mode=self.coord_mode)
+
+    @torch.no_grad()
+    def encode_buffer(self):
+        """
+        Encodes the current buffer into style latent using MotionCLIP.
+
+        HOYO前処理に準拠（正面視点座標系）:
+        - 初期フレーム中心化
+        - 身長正規化
+        - [Y_lat, Z_up] → [x, y]座標変換（Yaw補正なし）
+        - 標準化 (mean/std)
+
+        Returns:
+            (B, 512) shaped tensor of normalized motion latents.
+        """
+        centered = self._prepare_centered_2d(apply_yaw_correction=False, coord_mode=self.coord_mode)
+
+        # MotionCLIP expects (B, 14, 2, T)
+        x = centered.permute(0, 2, 3, 1)  # (B, 14, 2, 60)
         
         B = x.shape[0]
         Tcur = x.shape[3]

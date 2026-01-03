@@ -14,7 +14,6 @@ except ModuleNotFoundError:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from omni.isaac.leggedloco.leggedloco.mdp.style_module import StyleModule, INSTRUCTION_ONOMATOPEIA
-import random
 
 class StyleCommandGenerator(CommandTerm):
     """
@@ -29,7 +28,10 @@ class StyleCommandGenerator(CommandTerm):
 
         # Initialize StyleModule
         self.style_module = StyleModule(
-            device=str(self.device), run_name=self.cfg.run_name, num_envs=self.num_envs
+            device=str(self.device),
+            run_name=self.cfg.run_name,
+            num_envs=self.num_envs,
+            coord_mode=self.cfg.coord_mode,
         )
 
         # Buffers
@@ -42,6 +44,9 @@ class StyleCommandGenerator(CommandTerm):
 
         # Keep track of current text for debugging/logging
         self.current_texts = [""] * self.num_envs
+        # Deterministic sampling helpers (torch RNG)
+        self._style_cycle = torch.empty(0, dtype=torch.long)
+        self._style_cycle_ptr = 0
 
     def __str__(self) -> str:
         return "StyleCommandGenerator"
@@ -82,12 +87,37 @@ class StyleCommandGenerator(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         """Resample command for specified environments."""
         # Sample onomatopoeia for reset environments
-
         # If user provides a fixed list of styles to sample from
         styles = self.cfg.styles if self.cfg.styles is not None else INSTRUCTION_ONOMATOPEIA
+        if len(styles) == 0:
+            raise RuntimeError("StyleCommandGenerator has no available styles to sample.")
 
-        for env_id in env_ids:
-            text = random.choice(styles)
+        # Balanced sampling: cycle through a shuffled list to keep distribution even
+        if isinstance(env_ids, slice):
+            env_ids_list = list(range(self.num_envs)[env_ids])
+        else:
+            env_ids_list = list(env_ids)
+        num_styles = len(styles)
+        if self._style_cycle.numel() == 0 or (self._style_cycle_ptr + len(env_ids_list)) > self._style_cycle.numel():
+            # Refill cycle with new random permutations (torch RNG for reproducibility)
+            new_cycle = torch.randperm(num_styles, device="cpu")
+            if self._style_cycle_ptr < self._style_cycle.numel():
+                remaining = self._style_cycle[self._style_cycle_ptr :]
+                self._style_cycle = torch.cat([remaining, new_cycle])
+            else:
+                self._style_cycle = new_cycle
+            self._style_cycle_ptr = 0
+            while self._style_cycle.numel() < len(env_ids_list):
+                self._style_cycle = torch.cat(
+                    [self._style_cycle, torch.randperm(num_styles, device="cpu")]
+                )
+
+        style_indices = self._style_cycle[self._style_cycle_ptr : self._style_cycle_ptr + len(env_ids_list)]
+        self._style_cycle_ptr += len(env_ids_list)
+
+        for env_id, style_idx in zip(env_ids_list, style_indices.tolist()):
+            env_id = int(env_id)
+            text = styles[style_idx]
             self.current_texts[env_id] = text
 
             # Encode
@@ -123,5 +153,6 @@ except ModuleNotFoundError:
 class StyleCommandGeneratorCfg(CommandTermCfg):
     class_type: type = StyleCommandGenerator
     run_name: str = "sarashina_full_fixed"
+    coord_mode: str = "legacy_xz_yaw"
     styles: list[str] = None # If None, use all available in INSTRUCTION_ONOMATOPEIA
     resampling_time_range: tuple[float, float] = (1e9, 1e9) # Effectively never resample automatically, only on reset

@@ -89,6 +89,48 @@ R_{style} = \beta_{text} \cdot \underbrace{\cos(z_{agent}, z_{text})}_{\text{テ
 
 ※ `Linear Velocity Penalty (z)` (上下動ペナルティ) や `Undesired Contacts` は、本設定では **無効化 (None)** されています。これは視覚を使って障害物を乗り越える際に、上下動や一時的な接触が必要になるためです。
 
+### W&B ログの報酬キー対応表（どれがどの報酬か）
+W&B に出るキー名が「どの報酬に対応するか」を、**実装コード起点**で整理しました。
+
+#### 1) RSL-RL が必ず出す全体指標（合計報酬）
+| W&B Key | 内容 | 補足 |
+| :--- | :--- | :--- |
+| `Train/mean_reward` | **総報酬の平均**（直近100エピソードの合計報酬） | 重み付き報酬の合計（全 RewTerm の和） |
+| `Train/mean_reward_time` | 上記の time 軸版 | W&B 側で名前が置換される |
+| `Train/mean_episode_length` | エピソード長の平均 | |
+| `Train/mean_episode_length_time` | 上記の time 軸版 | W&B 側で名前が置換される |
+
+#### 2) style_reward が追加で出すメトリクス（env.extras 経由）
+※ これらは `legged-loco/.../mdp/rewards/style_rewards.py` で **明示的に env.extras に追加**している指標。
+
+| W&B Key | 中身 | 意味 |
+| :--- | :--- | :--- |
+| `metrics/style_text_sim` | $\cos(z_{agent}, z_{text})$ | **テキスト指示への一致度** |
+| `metrics/style_centroid_sim` | $\cos(z_{agent}, z_{centroid})$ | **スタイル重心への一致度** |
+| `metrics/style_reward_raw` | $\beta_{text} \cdot \text{TextSim} + \beta_{centroid} \cdot \text{CentrSim}$ | **style_tracking の素点（重み未適用）** |
+| `metrics/style_warmup_ratio` | バッファ充足率 | ウォームアップ完了率（0〜1） |
+
+> **style_tracking の実寄与**は  
+> `style_tracking.weight * metrics/style_reward_raw`  
+> （現在の weight は `h1_low_vision_cfg.py` で **3.0**）
+
+#### 3) style_reward のデバッグログ（直接 wandb.log）
+※ `style_rewards.py` が **10ステップごと**に直接ログ。
+
+| W&B Key | 中身 | 意味 |
+| :--- | :--- | :--- |
+| `debug/style_text_sim` | TextSim | デバッグ用（平均） |
+| `debug/style_centroid_sim` | CentrSim | デバッグ用（平均） |
+| `debug/style_reward_raw` | RawReward | デバッグ用（平均） |
+| `debug/style_reward_min` | min(RawReward) | ばらつき確認 |
+| `debug/style_reward_max` | max(RawReward) | ばらつき確認 |
+
+#### 4) もし「個別の基本報酬」が見えない場合
+現状のログは **`Train/mean_reward` が中心**で、  
+**各 RewTerm（例: lin_vel / ang_vel / feet_air_time など）の内訳は自動では出ません**。  
+もし W&B に内訳を出したい場合は、**各報酬項目を env.extras に追加**する必要があります  
+（style_reward の `metrics/*` と同じ方式）。
+
 ## 5. その他設定
 *   **タスク名**: `h1_vision`
 *   **スタイルコマンド**: `StyleCommandGeneratorCfg` (ランダムなオノマトペ/テキスト埋め込みを生成)
@@ -257,3 +299,16 @@ H1ロボットの多関節 (19DoF/Many Links) を、MotionCLIPが前提とする
    - 「せかせか」用に `action_rate` を緩和
 4. **学習ステップ数を増やす** (2000 → 5000)
 5. **ドメイン適応**: H1動作データでMotionCLIPを追加Fine-tuneする
+
+### 8.6 実験バリアント整理（実施済みセット）
+
+実際に回した3パターンを、変更点と狙いごとにまとめる（WandBのRun PathはOverviewから埋めてな）。
+
+| バリアント | ベース読込 | 主な変更ハイパラ | 目的/ねらい | WandB Run Path |
+| :--- | :--- | :--- | :--- | :--- |
+| **A: Scratch + Low Style** | なし（ランダム初期化） | `style_tracking` 0.5〜1.0（低め）<br>`residual_scale` 0.1<br>PF: 出力層のみ学習可 | ベースなしでどこまで歩けるか＋スタイルだけで学習したときの下限 | `jouta15123-osaka-univercity/navila-bench/<run_id_a>` |
+| **B: Base Load + Low Style** | あり（`model_4999.pt`） | `style_tracking` 0.5〜1.0（控えめ）<br>`residual_scale` 0.1<br>PF: 出力層だけUnfreeze + Residual | 歩行能力を維持しつつ、軽めのスタイル付与のベースライン | `jouta15123-osaka-univercity/navila-bench/<run_id_b>` |
+| **C: Base Load + High Style** | あり（`model_4999.pt`） | `style_tracking` 3.0（現行）<br>`residual_scale` 0.1<br>`feet_air_time` 0.1（緩和）<br>PF: 出力層Unfreeze + Residual | ベース歩行を保ちつつスタイルを強める主力設定 | `jouta15123-osaka-univercity/navila-bench/kl8p9g77` |
+
+- A→Bで「ベース有無」による歩行安定性の差を確認。B→Cで「スタイル強度アップ」による表現力向上と転倒率の変化を確認。
+- 比較に使う共通メトリクス: `Mean Reward`, `Style Text Similarity`, `Style Centroid Similarity`, `Velocity XY Error`, `Mean Episode Length`。`run.history().to_csv(...)` で並べると楽。

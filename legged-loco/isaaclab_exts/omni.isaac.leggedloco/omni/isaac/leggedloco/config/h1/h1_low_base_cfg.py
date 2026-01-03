@@ -229,6 +229,7 @@ class ObservationsCfg:
             params={"sensor_cfg": SceneEntityCfg("height_scanner")},
             clip=(-1.0, 1.0),
         )
+        style = ObsTerm(func=mdp.style_latents)
 
     # observation groups
     policy: PolicyCfg = PolicyCfg()
@@ -319,7 +320,7 @@ class CustomH1Rewards(H1Rewards):
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=0.5,
-        params={"command_name": "style_command", "beta_text": 0.5, "beta_centroid": 0.5},
+        params={"command_name": "style_command", "beta_text": 0.5, "beta_centroid": 0.5, "ramp_steps": 5000},
     )
 
 ##
