@@ -194,25 +194,19 @@ class ResidualActorCritic(ActorCritic):
         # observations: [base_obs, style_latent]
         self.update_distribution(observations)
         residual_mean = self.distribution.mean
-        # Use rsample to preserve gradients if needed
-        residual_sample = self.distribution.rsample()
+        residual_action = self.distribution.sample()
 
         if self.base_policy is not None:
             obs_base = observations[:, :-self.style_dim]
             base_mean = self.base_policy.act_inference(obs_base)
 
-            # action = base + scale * residual
-            action = base_mean + self.residual_scale * residual_sample
+            # Adjust distribution mean for correct log_prob computation
+            residual_mean = self.distribution.mean
+            combined_mean = base_mean + self.residual_scale * residual_mean
+            self.distribution = Normal(combined_mean, self.std)
+            return self.distribution.sample()
 
-            # Update distribution for correct log_prob computation
-            # Both mean and std are scaled by residual_scale
-            self.distribution = Normal(
-                base_mean + self.residual_scale * residual_mean,
-                self.std * self.residual_scale,
-            )
-            return action
-
-        return residual_sample
+        return residual_action
 
     def act_inference(self, observations):
         residual_mean = self.actor(observations)

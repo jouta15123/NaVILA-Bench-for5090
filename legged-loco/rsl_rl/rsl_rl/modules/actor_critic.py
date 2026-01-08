@@ -141,11 +141,13 @@ class ResidualActorCritic(ActorCritic):
     base_policy + alpha * style_policy(obs, style)
     """
     def __init__(self, num_actor_obs, num_critic_obs, num_actions, 
-                 style_dim=512, base_policy_checkpoint=None, residual_scale=0.1, 
+                 style_dim=512, base_policy_checkpoint=None, residual_scale=0.1,
+                 unfreeze_base_last_layer: bool = False,
                  **kwargs):
         
         self.style_dim = style_dim
         self.residual_scale = residual_scale
+        self.unfreeze_base_last_layer = unfreeze_base_last_layer
         
         # Initialize the residual policy (self.actor)
         # It takes the full observation (including style)
@@ -183,7 +185,14 @@ class ResidualActorCritic(ActorCritic):
                 loaded_dict = torch.load(base_policy_checkpoint, map_location=kwargs.get("device", "cpu"))
                 # rsl_rl saves "model_state_dict" usually
                 state_dict = loaded_dict["model_state_dict"] if "model_state_dict" in loaded_dict else loaded_dict
-                load_result = self.base_policy.load_state_dict(state_dict, strict=False)
+                # Load actor-only weights to avoid critic shape mismatch
+                actor_only = {}
+                for k, v in state_dict.items():
+                    if k.startswith("actor."):
+                        actor_only[k] = v
+                    elif k in ("std", "log_std"):
+                        actor_only[k] = v
+                load_result = self.base_policy.load_state_dict(actor_only, strict=False)
                 if load_result.missing_keys or load_result.unexpected_keys:
                     print(
                         "Base Policy Loaded with mismatched keys. "
@@ -209,19 +218,17 @@ class ResidualActorCritic(ActorCritic):
                     # But named_parameters gives flattened names "actor.0.weight" etc.
                     p.requires_grad = False
                 
-                # Unfreeze last layer explicitly
-                # Assuming simple sequential actor
-                if hasattr(self.base_policy, "actor") and isinstance(self.base_policy.actor, nn.Sequential):
-                     # Get last layer index
-                     last_layer_idx = len(self.base_policy.actor) - 1
-                     # If last is just activation/layer, search back for Linear
-                     for i in range(len(self.base_policy.actor)-1, -1, -1):
-                         layer = self.base_policy.actor[i]
-                         if isinstance(layer, nn.Linear):
-                             print(f"Unfreezing Base Policy Layer: actor.{i} ({layer})")
-                             for param in layer.parameters():
-                                 param.requires_grad = True
-                             break
+                # Optionally unfreeze last layer (disabled by default to preserve base behavior)
+                if self.unfreeze_base_last_layer:
+                    if hasattr(self.base_policy, "actor") and isinstance(self.base_policy.actor, nn.Sequential):
+                        # If last is just activation/layer, search back for Linear
+                        for i in range(len(self.base_policy.actor)-1, -1, -1):
+                            layer = self.base_policy.actor[i]
+                            if isinstance(layer, nn.Linear):
+                                print(f"Unfreezing Base Policy Layer: actor.{i} ({layer})")
+                                for param in layer.parameters():
+                                    param.requires_grad = True
+                                break
         else:
             print("No base policy checkpoint provided. Training from scratch (Residual=Total).")
 
@@ -235,25 +242,19 @@ class ResidualActorCritic(ActorCritic):
         # observations: [base_obs, style_latent]
         self.update_distribution(observations)
         residual_mean = self.distribution.mean
-        # Use rsample to preserve gradients if needed
-        residual_sample = self.distribution.rsample()
+        residual_action = self.distribution.sample()
 
         if self.base_policy is not None:
             obs_base = observations[:, :-self.style_dim]
             base_mean = self.base_policy.act_inference(obs_base)
 
-            # action = base + scale * residual
-            action = base_mean + self.residual_scale * residual_sample
+            # Adjust distribution mean for correct log_prob computation
+            residual_mean = self.distribution.mean
+            combined_mean = base_mean + self.residual_scale * residual_mean
+            self.distribution = Normal(combined_mean, self.std)
+            return self.distribution.sample()
 
-            # Update distribution for correct log_prob computation
-            # Both mean and std are scaled by residual_scale
-            self.distribution = Normal(
-                base_mean + self.residual_scale * residual_mean,
-                self.std * self.residual_scale,
-            )
-            return action
-
-        return residual_sample
+        return residual_action
 
     def act_inference(self, observations):
         residual_mean = self.actor(observations)

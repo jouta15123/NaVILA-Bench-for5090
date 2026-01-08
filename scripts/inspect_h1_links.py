@@ -23,6 +23,9 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(PROJECT_ROOT)
 if REPO_ROOT not in sys.path:
     sys.path.append(REPO_ROOT)
+SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
+if os.path.isdir(SCRIPTS_DIR) and SCRIPTS_DIR not in sys.path:
+    sys.path.append(SCRIPTS_DIR)
 ISAACLAB_SOURCE = os.path.join(os.path.dirname(REPO_ROOT), "IsaacLab", "source")
 if os.path.isdir(ISAACLAB_SOURCE) and ISAACLAB_SOURCE not in sys.path:
     sys.path.append(ISAACLAB_SOURCE)
@@ -35,6 +38,16 @@ if os.path.isdir(ISAACLAB_TASKS_PKG) and ISAACLAB_TASKS_PKG not in sys.path:
 ISAACLAB_RL_PKG = os.path.join(ISAACLAB_SOURCE, "isaaclab_rl")
 if os.path.isdir(ISAACLAB_RL_PKG) and ISAACLAB_RL_PKG not in sys.path:
     sys.path.append(ISAACLAB_RL_PKG)
+py_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+ISAACLAB_SITE_PACKAGES = os.path.join(
+    os.path.dirname(ISAACLAB_SOURCE),
+    "env_isaaclab",
+    "lib",
+    py_version,
+    "site-packages",
+)
+if os.path.isdir(ISAACLAB_SITE_PACKAGES) and ISAACLAB_SITE_PACKAGES not in sys.path:
+    sys.path.insert(0, ISAACLAB_SITE_PACKAGES)
 
 # Local extensions (vlnce / matterport)
 LOCAL_EXT_PATH_GROUPS = [
@@ -69,6 +82,21 @@ try:
     from omni.isaac.lab.app import AppLauncher
 except ModuleNotFoundError:
     from isaaclab.app import AppLauncher
+    # Provide a minimal alias so downstream "omni.isaac.lab.*" imports work in scripts
+    # that expect the Omni namespace (e.g., vlnce config utilities).
+    try:
+        import importlib
+        import isaaclab
+        sys.modules.setdefault("omni.isaac.lab", isaaclab)
+        for sub in ("app", "managers", "sensors", "envs", "utils", "markers", "sim"):
+            try:
+                mod = importlib.import_module(f"isaaclab.{sub}")
+            except ModuleNotFoundError:
+                continue
+            sys.modules.setdefault(f"omni.isaac.lab.{sub}", mod)
+    except Exception:
+        # If aliasing fails, we'll still try to proceed with direct isaaclab usage.
+        pass
 
 
 def main():
@@ -105,6 +133,8 @@ def main():
         from isaaclab.utils.io import load_yaml
         from isaaclab.utils import update_class_from_dict
 
+    # Register VLNCE task configs (needed so gym can find h1_matterport_* tasks)
+    import omni.isaac.vlnce.config  # noqa: F401
     from omni.isaac.vlnce.utils import ASSETS_DIR
     from omni.isaac.vlnce.utils.eval_utils import read_episodes
 

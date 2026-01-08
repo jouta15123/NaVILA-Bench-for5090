@@ -625,6 +625,8 @@ def train_joint(
     lr: float = 1e-4,
     lr_encoder: float = 1e-5,
     lr_decoder: float = 1e-5,
+    weight_decay: float = 0.0,
+    seed: int = 42,
     log_interval: int = 100,
     eval_interval: int = 200,
     lambda_contrastive: float = 1.0,
@@ -644,6 +646,7 @@ def train_joint(
     retrieval_ks: tuple = (1, 3, 5),
     eval_retrieval: bool = True,
     eval_silhouette: bool = True,
+    best_metric: str = "acc@1",
 ):
     os.makedirs(out_dir, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
@@ -735,7 +738,7 @@ def train_joint(
     else:
         raise ValueError(f"Unknown stage '{stage}'")
 
-    optimizer = torch.optim.AdamW(trainable_groups)
+    optimizer = torch.optim.AdamW(trainable_groups, weight_decay=weight_decay)
 
     # Optional LR scheduler (helps prevent late-stage divergence)
     scheduler = None
@@ -758,7 +761,8 @@ def train_joint(
     sem_emb = sem_emb.to(device)
     
     loss_history = []
-    best_test_acc = -1.0
+    best_score = float("-inf")
+    best_metric_name = best_metric
     evals_since_best = 0
     
     # Running stats for readable logging
@@ -773,7 +777,7 @@ def train_joint(
     print(f"Start Joint Training for {steps} steps... (stage={stage})")
     print(
         f"  Config: batch_size={batch_size}, lr={lr}, lr_encoder={lr_encoder}, "
-        f"lr_decoder={lr_decoder}, lambda_vae={lambda_vae}, "
+        f"lr_decoder={lr_decoder}, weight_decay={weight_decay}, lambda_vae={lambda_vae}, "
         f"lambda_contrastive={lambda_contrastive}, temp={temp}"
     )
 
@@ -785,8 +789,17 @@ def train_joint(
     weights = [1.0 / label_counts[lab] for (lab, _) in train_dataset._indices]
     
     # Create DataLoader
-    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
-    dataloader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler, drop_last=True, num_workers=0)
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=gen)
+    dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        sampler=sampler,
+        drop_last=True,
+        num_workers=0,
+        generator=gen,
+    )
     data_iterator = iter(dataloader)
     
     for step in range(1, steps + 1):
@@ -997,6 +1010,7 @@ def train_joint(
                 }, step=step)
 
 
+            retrieval = None
             if eval_retrieval:
                 retrieval = evaluate_retrieval_metrics(
                     test_dataset,
@@ -1060,10 +1074,29 @@ def train_joint(
                     if log_payload:
                         wandb_run.log(log_payload, step=step)
 
-            # Save BEST model based on Test Acc
-            if test_acc > best_test_acc:
-                best_test_acc = test_acc
-                print(f"  >>> New Best Test Acc: {best_test_acc:.3f}! Saving model...")
+            # Save BEST model based on selected metric
+            if best_metric_name == "acc@1":
+                score = test_acc
+            elif best_metric_name == "m2t_r@1":
+                if retrieval is None:
+                    raise RuntimeError("best_metric=m2t_r@1 requires retrieval evaluation.")
+                score = retrieval["m2t"].get("R@1", 0.0)
+            elif best_metric_name == "t2m_r@1":
+                if retrieval is None:
+                    raise RuntimeError("best_metric=t2m_r@1 requires retrieval evaluation.")
+                score = retrieval["t2m"].get("R@1", 0.0)
+            elif best_metric_name == "avg_r@1":
+                if retrieval is None:
+                    raise RuntimeError("best_metric=avg_r@1 requires retrieval evaluation.")
+                score = 0.5 * (
+                    retrieval["m2t"].get("R@1", 0.0) + retrieval["t2m"].get("R@1", 0.0)
+                )
+            else:
+                raise ValueError(f"Unknown best_metric '{best_metric_name}'")
+
+            if score > best_score:
+                best_score = score
+                print(f"  >>> New Best ({best_metric_name}): {best_score:.3f}! Saving model...")
                 torch.save(model.encoder.state_dict(), ckpt_dir / "motionclip_encoder_joint_best.pth")
                 torch.save(sem_proj.state_dict(), ckpt_dir / "sem_proj_joint_best.pth")
                 torch.save({"logit_scale": logit_scale.detach().cpu()}, ckpt_dir / "logit_scale_joint_best.pt")
@@ -1139,6 +1172,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument("--lr-encoder", type=float, default=1e-5)
     parser.add_argument("--lr-decoder", type=float, default=1e-5)
+    parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--temp", type=float, default=0.07, help="Contrastive temperature")
     parser.add_argument("--log-interval", type=int, default=100, help="Logging interval (steps)")
     parser.add_argument("--eval-interval", type=int, default=200, help="Evaluation interval (steps)")
@@ -1220,6 +1254,12 @@ def parse_args():
         action="store_true",
         help="Skip silhouette score computation.",
     )
+    parser.add_argument(
+        "--best-metric",
+        choices=["acc@1", "m2t_r@1", "t2m_r@1", "avg_r@1"],
+        default="acc@1",
+        help="Metric used to select the best checkpoint.",
+    )
     return parser.parse_args()
 
 
@@ -1235,6 +1275,9 @@ def main():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+
+    if args.best_metric != "acc@1" and args.no_retrieval_eval:
+        raise ValueError("best_metric requires retrieval evaluation; do not use --no-retrieval-eval.")
 
     hoyo_root = HOYO_ROOT
     if args.run_name:
@@ -1321,20 +1364,29 @@ def main():
         if wandb is None:
             raise ImportError("wandb is not installed in this environment. Please install it or run without --wandb.")
         wandb_config = {
+            "run_name": run_name,
             "stage": args.stage,
             "steps": args.steps,
             "batch_size": args.batch_size,
             "label_mode": args.label_mode,
             "sem_encoder": args.sem_encoder,
+            "contrastive_mode": args.contrastive_mode,
             "lr": args.lr,
             "lr_encoder": args.lr_encoder,
             "lr_decoder": args.lr_decoder,
+            "weight_decay": args.weight_decay,
             "lambda_contrastive": args.lambda_contrastive,
             "lambda_vae": args.lambda_vae,
             "temp": args.temp,
             "log_interval": args.log_interval,
             "eval_interval": args.eval_interval,
             "vis_max_per_label": args.vis_max_per_label,
+            "use_aug": args.use_aug,
+            "view_filter": args.view_filter,
+            "snapshot_splits": args.snapshot_splits,
+            "retrieval_ks": args.retrieval_ks,
+            "no_silhouette": args.no_silhouette,
+            "best_metric": args.best_metric,
             "target_len": target_len,
             "device": str(device),
         }
@@ -1343,6 +1395,7 @@ def main():
             entity=args.wandb_entity,
             group=args.wandb_group,
             config=wandb_config,
+            name=run_name,
         )
     
     try:
@@ -1363,6 +1416,8 @@ def main():
             lr=args.lr,
             lr_encoder=args.lr_encoder,
             lr_decoder=args.lr_decoder,
+            weight_decay=args.weight_decay,
+            seed=args.seed,
             log_interval=args.log_interval,
             eval_interval=args.eval_interval,
             lambda_contrastive=args.lambda_contrastive,
@@ -1381,6 +1436,7 @@ def main():
             retrieval_ks=tuple(int(k) for k in args.retrieval_ks.split(",") if k.strip()),
             eval_retrieval=not args.no_retrieval_eval,
             eval_silhouette=not args.no_silhouette,
+            best_metric=args.best_metric,
         )
     finally:
         if wandb_run is not None:

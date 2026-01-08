@@ -46,6 +46,7 @@ class CustomPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     base_policy_checkpoint: str = None
     style_dim: int = 512
     residual_scale: float = 0.1
+    unfreeze_base_last_layer: bool = False
 
 @configclass
 class H1VisionRoughPPORunnerCfg(H1RoughPPORunnerCfg):
@@ -64,7 +65,8 @@ class H1VisionRoughPPORunnerCfg(H1RoughPPORunnerCfg):
         # Use resume (load_run + checkpoint) to continue training instead of loading a mismatched base.
         base_policy_checkpoint="/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2024-11-03_15-08-09_height_scan_obst/model_4999_pad877_256.pt",
         style_dim=512,
-        residual_scale=0.1,
+        residual_scale=0.3,  # Increased from 0.1 to allow more style influence
+        unfreeze_base_last_layer=True,
     )
 
 
@@ -376,6 +378,11 @@ class CustomH1Rewards(H1Rewards):
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*ankle_link"),
         },
     )
+    heading_tracking = RewTerm(
+        func=mdp.track_heading_world_exp,
+        weight=2.0,
+        params={"target_heading": 0.0, "std": 0.3},  # 0.0 = world x正方向
+    )
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=3.0,  # Increased from 1.0 to balance with velocity tracking
@@ -463,13 +470,16 @@ class H1VisionRoughEnvCfg(ManagerBasedRLEnvCfg):
             },
         }
 
-        # Rewards
+        # Rewards - Style-focused mode
         self.rewards.undesired_contacts = None
-        self.rewards.flat_orientation_l2.weight = -1.0
+        self.rewards.track_lin_vel_xy_exp = None  # Disable linear velocity tracking
+        # Strongly discourage yaw rotation while keeping style focus
+        self.rewards.track_ang_vel_z_exp.weight = 2.0
+        self.rewards.flat_orientation_l2.weight = -0.5  # Reduced to allow style-induced posture changes
         self.rewards.dof_torques_l2.weight = 0.0
         self.rewards.action_rate_l2.weight = -0.005
         self.rewards.dof_acc_l2.weight = -1.25e-7
-        self.rewards.feet_air_time.weight = 0.1
+        self.rewards.feet_air_time.weight = 0.5  # Increased to maintain walking
 
         # Commands
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 1.0)
@@ -498,6 +508,58 @@ class H1VisionRoughEnvCfg(ManagerBasedRLEnvCfg):
             if self.scene.terrain.terrain_generator is not None:
                 self.scene.terrain.terrain_generator.curriculum = False
         # self.curriculum.terrain_levels = None
+
+
+@configclass
+class H1VisionRoughEnvCfg_Legacy(H1VisionRoughEnvCfg):
+    """Legacy training config (XZ + yaw projector)."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.style_command.coord_mode = "legacy_xz_yaw"
+
+
+@configclass
+class H1VisionRoughEnvCfg_HeadingFixed(H1VisionRoughEnvCfg):
+    """Training config with fixed heading (yaw locked to 0).
+
+    目的: world X正方向に歩行し、正面視2D投影（hoyo_front）を安定させる。
+
+    変更点 (2026-01-06):
+    - heading=0固定、ang_vel_z=0固定
+    - 初期yaw=0でスタート（ランダムではない）
+    - 前進報酬（track_lin_vel_xy_exp）を有効化
+    - heading報酬（track_heading_world_exp）で方向を維持
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # === 変更1: ang_vel_z を0に固定 ===
+        # 旧: self.commands.base_velocity.ranges.ang_vel_z = (-0.3, 0.3)
+        # 新: heading報酬のみで方向制御するため、ang_vel_zコマンドは使わない
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        self.commands.base_velocity.ranges.heading = (0.0, 0.0)
+        self.commands.base_velocity.heading_command = True
+
+        # === 変更2: 初期yawを0に固定 ===
+        # 旧: yaw = (-3.14, 3.14) ランダム
+        # 新: 常にworld X正方向を向いてスタート
+        self.events.reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
+
+        # === 変更3: 前進報酬を有効化 ===
+        # 旧: track_lin_vel_xy_exp = None (親クラスで無効化)
+        # 新: lin_vel_xコマンドに追従して前進
+        self.rewards.track_lin_vel_xy_exp = RewTerm(
+            func=mdp.track_lin_vel_xy_exp,
+            weight=1.0,
+            params={"std": 0.5, "command_name": "base_velocity"},
+        )
+
+        # === 変更4: ang_vel_z報酬を無効化 ===
+        # 旧: track_ang_vel_z_exp.weight = 2.0 (親クラス)
+        # 新: heading報酬と競合するため無効化
+        self.rewards.track_ang_vel_z_exp = None
 
 
 @configclass

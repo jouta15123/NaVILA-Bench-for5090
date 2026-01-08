@@ -74,20 +74,36 @@ phon encoder や未知語対応は次フェーズの拡張とする．
 
 ---
 
-### 3. H1 → HOYO リターゲット（Option A）
+### 3. H1 → HOYO リターゲット（canonical / legacy）
 
 MotionCLIP encoder は HOYO 形式
 \((T^\*, J, C) = (60, 14, 2)\) の 2D 関節列を前提とするため，
 H1 の 3D 関節軌跡を一時的に HOYO 形式に変換する．
 この変換は style reward 計算のみに用い，RL policy 自体の制御には関与しない．
 
+**デフォルト（canonical）**:
+- `coord_mode = hoyo_front`
+- 2D投影: \(x = +Y_{\mathrm{H1}},\; y = -Z_{\mathrm{H1}}\)（左+, 下+）
+- yaw補正なし（HOYO統計と一致させる）
+
+**legacy（比較用）**:
+- `coord_mode = legacy_xz_yaw`
+- XZ平面 + yaw補正（過去実装との互換）
+
+**運用（task切替）**:
+- canonical: `--task h1_vision`（デフォルトで `hoyo_front`）
+- legacy: `--task h1_vision_legacy`
+
+**実測デバッグ（2026-01-04）**:
+- `legged-loco/scripts/debug_hoyo_axes.py` で肩/足首の符号を確認済み
+- H1 Y+: 左 / H1 Z+: 上 / HOYO x+: 左 / HOYO y+: 下
+- head–feet 2D距離（pre-std）= 1.0（スケール正常）
+
 #### 3.1 座標系の正規化
 
 1. H1 の前進運動学から，主要関節の 3D 位置 \(p_j \in \mathbb{R}^3\) を取得する．
-2. 骨盤リンクを原点とし，前方方向を \(+x\) 軸，床面を \(x\)–\(z\) 平面とする
-   ボディ座標系に変換する．
-3. 高さ方向 \(y\) を無視し，
-   \((x, z)\) の 2次元座標として 2D 関節位置を得る．
+2. **canonical** は yaw補正を行わず，世界座標の \(Y, Z\) を使用する（右+, 下+ へ符号反転）．
+3. **legacy** は yaw補正後に \(X, Z\) を使用する（比較用）．
 
 #### 3.2 関節対応
 
@@ -142,7 +158,7 @@ H1 の関節構造と HOYO の 14 関節との対応表を設計する．
         z_{\mathrm{sem(onm)}}
       \right)
   \]
-  と定義する．
+  と定義する（legacyと同型）．
 - 最終的な一段時間あたりの報酬は
   \[
     r_t
@@ -258,5 +274,3 @@ H1 の関節構造と HOYO の 14 関節との対応表を設計する．
 実際の RL コードのフック位置やファイル名は，
 今後 `scripts/rsl_rl/` 以下を精査しながら具体化するが，
 本ドキュメントはその際の仕様書として用いる．
-
-

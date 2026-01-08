@@ -1,0 +1,92 @@
+\documentclass[a4paper,12pt,uplatex]{jsreport}
+\usepackage{libs/nagailab_ronbun}
+\usepackage[dvipdfmx]{graphicx}
+\usepackage{fancyhdr}
+\setlength{\headheight}{16.5pt}
+\addtolength{\topmargin}{-4.5pt}
+\usepackage{algpseudocode}
+\usepackage{algorithm}
+% \usepackage[noend]{algpseudocode}
+\usepackage{amssymb}
+\usepackage{type1cm}
+\usepackage{url}
+\usepackage{comment}
+\usepackage{here}
+\usepackage{color}
+\usepackage{bm} 
+% subfigmat は subfigure を読み込むため subcaption と競合する
+% 両方必要な場合は subfigure 系だけ使う
+\usepackage{subfigmat}
+\usepackage[hang,small,bf]{caption}
+\captionsetup{compatibility=false}
+\usepackage{lscape}
+\usepackage{enumitem}
+\usepackage{amsmath}
+\usepackage{listings}
+% \usepackage{subcaption} % subfigure と互換性がないためコメントアウト
+\usepackage{multirow}
+\usepackage{multicol}
+
+\usepackage{booktabs}
+\usepackage{tabularx}
+
+\lstset{
+  basicstyle={\small\ttfamily},
+  identifierstyle={\small},
+  commentstyle={\smallitshape},
+  keywordstyle={\small\bfseries},
+  ndkeywordstyle={\small},
+  stringstyle={\small\ttfamily},
+  frame={tb},
+  breaklines=true,
+  columns=[l]{fullflexible},
+  numbers=left,
+  xrightmargin=0zw,
+  xleftmargin=3zw,
+  numberstyle={\scriptsize},
+  stepnumber=1,
+  numbersep=1zw,
+  lineskip=-0.5ex
+}
+
+\jtitlename{特 別 研 究 報 告}
+\title{対照学習と強化学習によるオノマトペの歩容スタイル付与}
+\affiliation{大阪大学基礎工学部システム科学科知能システム学コース}
+\author{佐々木條太}
+\idnumber{09C23707}
+\date{令和7年2月5日}
+
+
+\begin{document}
+\maketitle       %表紙生成
+\input{src/0abstract.tex} %概要
+\tableofcontents %目次
+\thispagestyle{empty}
+\listoffigures %図一覧
+\thispagestyle{empty}
+\listoftables %表一覧
+\thispagestyle{empty}
+\newpage
+
+\setcounter{page}{1}			%ページ数のスタートを１に設定
+\def\thepage{\arabic{page}}     %ページ表示開始
+\pagestyle{fancy}
+\renewcommand{\chaptermark}[1]{\markboth{第\ \thechapter\ 章 #1}{}} 
+\renewcommand{\sectionmark}[1]{\markright{\thesection.\ #1}}
+
+% ここより下に本文を記述 %
+% 章ごとにファイルを分割する形式. 章立ては１例です。%
+\input{src/1intro.tex}  %序論
+\input{src/2theory.tex} %理論
+\input{src/3proposed_method.tex} %提案手法
+\input{src/4experiment.tex} %実験
+\input{src/5result.tex} %実験
+\input{src/6discussion.tex} %考察/議論
+\input{src/7conclusion.tex} %結論
+\input{src/aknowlegement.tex} %謝辞
+% \input{src/bibliography.tex} %参考文献(直接記述する場合)
+\input{src/bibtex_bibliography.tex} %参考文献(bibtexを使う場合)
+% \input{src/publications.tex} %発表実績(直接記述する場合)
+% \input{src/awards.tex} %受賞歴
+\input{src/8appendix.tex}
+\end{document}

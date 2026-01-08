@@ -166,12 +166,12 @@ class HoyoInstructionDataset(Dataset):
         # HOYOの関節順序: [頭, 首, 右肩, 右肘, 右手, 左肩, 左肘, 左手, 右腰, 右膝, 右足, 左腰, 左膝, 左足]
         # index:          0,  1,  2,   3,   4,   5,   6,   7,   8,   9,  10,  11,  12,  13
         # 座標順序: [y, x] (画像座標系)
-        
+
         head_pos = arr_centered[:, 0, :] # 頭
-        
+
         # 足の位置 (右足:10, 左足:13) の中点
         feet_pos = 0.5 * (arr_centered[:, 10, :] + arr_centered[:, 13, :])
-        
+
         dists = np.linalg.norm(head_pos - feet_pos, axis=-1)
         scale = dists.mean()
         if scale < 1e-6:

@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import torch
 from pathlib import Path
@@ -152,7 +153,7 @@ except ModuleNotFoundError:
 @dataclass
 class StyleCommandGeneratorCfg(CommandTermCfg):
     class_type: type = StyleCommandGenerator
-    run_name: str = "sarashina_full_fixed"
-    coord_mode: str = "legacy_xz_yaw"
+    run_name: str = field(default_factory=lambda: os.environ.get("STYLE_RUN_NAME", "sarashina_full_fixed"))
+    coord_mode: str = "hoyo_front"
     styles: list[str] = None # If None, use all available in INSTRUCTION_ONOMATOPEIA
     resampling_time_range: tuple[float, float] = (1e9, 1e9) # Effectively never resample automatically, only on reset

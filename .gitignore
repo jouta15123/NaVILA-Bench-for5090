@@ -30,3 +30,5 @@ MotionCLIP/exps/
 hoyo_v1_1/log/
 hoyo_v1_1/proto_training_results/
 .steering/
+
+wandb/

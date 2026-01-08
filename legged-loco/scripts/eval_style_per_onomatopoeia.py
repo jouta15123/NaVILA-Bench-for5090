@@ -107,13 +107,47 @@ parser.add_argument("--output_dir", type=str, default="eval_results/style_per_on
 parser.add_argument("--log_root", type=str, default=None, help="Override log root directory containing rsl_rl runs.")
 parser.add_argument("--use_log_env", action="store_true", default=True, help="Use env.yaml from the run if available.")
 parser.add_argument("--use_base_policy", action="store_true", default=False, help="Load base policy for residual actor.")
-parser.add_argument("--compute_hoyo_error", action="store_true", default=False)
+parser.add_argument(
+    "--compute_hoyo_error",
+    action="store_true",
+    default=False,
+    help="(Legacy) Enable HOYO error computation. HOYO error is enabled by default unless --no_hoyo_error is set.",
+)
+parser.add_argument(
+    "--no_hoyo_error",
+    action="store_true",
+    default=False,
+    help="Disable HOYO error computation (enabled by default).",
+)
 parser.add_argument("--hoyo_root", type=str, default=None)
 parser.add_argument("--hoyo_samples_per_label", type=int, default=5)
 parser.add_argument("--hoyo_eval_interval", type=int, default=10)
 parser.add_argument("--hoyo_metric", type=str, choices=["dtw", "l2"], default="dtw")
 parser.add_argument("--hoyo_dtw_band", type=int, default=10)
 parser.add_argument("--hoyo_seed", type=int, default=42)
+parser.add_argument(
+    "--style_list",
+    type=str,
+    default=None,
+    help="Comma-separated style list to evaluate (overrides default onomatopoeia list).",
+)
+parser.add_argument(
+    "--base_velocity_mode",
+    type=str,
+    choices=["env", "fixed", "style_table"],
+    default="fixed",
+    help="How to set base_velocity command during evaluation.",
+)
+parser.add_argument("--base_lin_vel_x", type=float, default=0.5, help="Fixed command lin_vel_x.")
+parser.add_argument("--base_lin_vel_y", type=float, default=0.0, help="Fixed command lin_vel_y.")
+parser.add_argument("--base_ang_vel_z", type=float, default=0.0, help="Fixed command ang_vel_z.")
+parser.add_argument("--base_heading", type=float, default=0.0, help="Fixed command heading.")
+parser.add_argument(
+    "--style_speed_table",
+    type=str,
+    default=None,
+    help="JSON mapping for style -> speed. Value can be float (lin_vel_x) or dict.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -158,6 +192,79 @@ from hoyo_v1_1.models.common import HoyoInstructionDataset, apply_normalization_
 
 # List of onomatopoeia to evaluate
 ONOMATOPOEIA_LIST = INSTRUCTION_ONOMATOPEIA
+
+
+def _get_command_tensor(command_term):
+    for attr in ("_command", "command", "commands"):
+        if hasattr(command_term, attr):
+            tensor = getattr(command_term, attr)
+            if torch.is_tensor(tensor):
+                return tensor
+    return None
+
+
+def _set_base_velocity_for_envs(command_term, env_ids, cmd: dict) -> bool:
+    cmd_tensor = _get_command_tensor(command_term)
+    if cmd_tensor is None:
+        return False
+    lin_x = float(cmd.get("lin_vel_x", 0.0))
+    lin_y = float(cmd.get("lin_vel_y", 0.0))
+    ang_z = float(cmd.get("ang_vel_z", 0.0))
+    heading = float(cmd.get("heading", 0.0))
+    for env_id in env_ids:
+        idx = int(env_id)
+        if cmd_tensor.shape[1] > 0:
+            cmd_tensor[idx, 0] = lin_x
+        if cmd_tensor.shape[1] > 1:
+            cmd_tensor[idx, 1] = lin_y
+        if cmd_tensor.shape[1] > 2:
+            cmd_tensor[idx, 2] = ang_z
+        if cmd_tensor.shape[1] > 3:
+            cmd_tensor[idx, 3] = heading
+    return True
+
+
+def _normalize_style_speed_entry(value, default_cmd: dict) -> dict:
+    if isinstance(value, (int, float)):
+        return {
+            "lin_vel_x": float(value),
+            "lin_vel_y": default_cmd["lin_vel_y"],
+            "ang_vel_z": default_cmd["ang_vel_z"],
+            "heading": default_cmd["heading"],
+        }
+    if isinstance(value, (list, tuple)) and len(value) > 0:
+        cmd = dict(default_cmd)
+        cmd["lin_vel_x"] = float(value[0])
+        if len(value) > 1:
+            cmd["lin_vel_y"] = float(value[1])
+        if len(value) > 2:
+            cmd["ang_vel_z"] = float(value[2])
+        if len(value) > 3:
+            cmd["heading"] = float(value[3])
+        return cmd
+    if isinstance(value, dict):
+        cmd = dict(default_cmd)
+        for key in ("lin_vel_x", "lin_vel_y", "ang_vel_z", "heading"):
+            if key in value and value[key] is not None:
+                cmd[key] = float(value[key])
+        return cmd
+    return dict(default_cmd)
+
+
+def load_style_speed_table(path: str | None, default_cmd: dict) -> dict:
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception as exc:
+        print(f"[WARN] Failed to load style_speed_table: {exc}")
+        return {}
+    table = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            table[key] = _normalize_style_speed_entry(value, default_cmd)
+    return table
 
 
 def quat2eulers(w, x, y, z):
@@ -287,8 +394,8 @@ def enforce_num_envs(env_cfg, num_envs: int) -> None:
 
 def resolve_norm_stats_path(hoyo_root: Path, run_name: str) -> Path:
     candidates = [
-        hoyo_root / "joint_training_results" / "normalization_stats.json",
         hoyo_root / "joint_training_results" / run_name / "normalization_stats.json",
+        hoyo_root / "joint_training_results" / "normalization_stats.json",
         hoyo_root / "data" / "normalization_stats.json",
     ]
     for path in candidates:
@@ -403,11 +510,22 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                           teacher_cache: dict | None = None,
                           hoyo_metric: str = "dtw",
                           hoyo_eval_interval: int = 10,
-                          hoyo_dtw_band: int = 10):
+                          hoyo_dtw_band: int = 10,
+                          base_velocity_mode: str = "env",
+                          base_cmd_default: dict | None = None,
+                          style_speed_table: dict | None = None):
     """Evaluate a single onomatopoeia and collect metrics."""
     
     # Force set the style command for all envs
     style_gen = env.unwrapped.command_manager._terms["style_command"]
+    base_cmd_term = env.unwrapped.command_manager._terms.get("base_velocity", None)
+    base_cmd_default = base_cmd_default or {
+        "lin_vel_x": 0.5,
+        "lin_vel_y": 0.0,
+        "ang_vel_z": 0.0,
+        "heading": 0.0,
+    }
+    style_speed_table = style_speed_table or {}
     
     # Reset environment and rebuild observation with history buffer (if enabled)
     # Note: some wrappers return the raw policy obs on reset; calling
@@ -417,6 +535,14 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
     # Manually set the onomatopoeia for all environments AFTER reset
     # (reset triggers command resampling, so set style after it).
     _set_style_for_envs(style_gen, range(env.unwrapped.num_envs), onomatopoeia)
+
+    # Optionally override base_velocity command (fixed or style-dependent)
+    if base_cmd_term is not None and base_velocity_mode != "env":
+        if base_velocity_mode == "style_table":
+            base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
+        else:
+            base_cmd = base_cmd_default
+        _set_base_velocity_for_envs(base_cmd_term, range(env.unwrapped.num_envs), base_cmd)
     
     obs, _ = env.get_observations()
     
@@ -436,6 +562,10 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "velocities_y": [],
         "velocities_z": [],
         "angular_vel_z": [],
+        "cmd_lin_vel_x": [],
+        "cmd_lin_vel_y": [],
+        "cmd_ang_vel_z": [],
+        "cmd_heading": [],
         "roll": [],
         "pitch": [],
         "episode_lengths": [],
@@ -460,6 +590,17 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
             base_lin_vel = robot.data.root_lin_vel_w  # (N, 3)
             base_ang_vel = robot.data.root_ang_vel_w  # (N, 3)
             root_quat = robot.data.root_quat_w  # (N, 4)
+
+            # Log commanded base_velocity (if available)
+            cmd = env.unwrapped.command_manager.get_command("base_velocity")
+            if cmd is not None and cmd.numel() > 0:
+                metrics["cmd_lin_vel_x"].append(cmd[:, 0].mean().item())
+                if cmd.shape[1] > 1:
+                    metrics["cmd_lin_vel_y"].append(cmd[:, 1].mean().item())
+                if cmd.shape[1] > 2:
+                    metrics["cmd_ang_vel_z"].append(cmd[:, 2].mean().item())
+                if cmd.shape[1] > 3:
+                    metrics["cmd_heading"].append(cmd[:, 3].mean().item())
             
             # Extract metrics
             metrics["velocities_x"].append(base_lin_vel[:, 0].mean().item())
@@ -498,6 +639,21 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                 episode_count += int(dones.sum().item())
                 # Enforce fixed style after reset
                 _set_style_for_envs(style_gen, done_ids, onomatopoeia)
+                if base_cmd_term is not None and base_velocity_mode != "env":
+                    if base_velocity_mode == "style_table":
+                        base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
+                    else:
+                        base_cmd = base_cmd_default
+                    _set_base_velocity_for_envs(base_cmd_term, done_ids, base_cmd)
+
+            # Enforce base_velocity every step to avoid resampling drift
+            if base_cmd_term is not None and base_velocity_mode != "env":
+                if base_velocity_mode == "style_table":
+                    base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
+                else:
+                    base_cmd = base_cmd_default
+                _set_base_velocity_for_envs(base_cmd_term, range(env.unwrapped.num_envs), base_cmd)
+                obs, _ = env.get_observations()
 
             # HOYO error (optional, interval-based)
             if teacher_cache is not None and (step % max(1, hoyo_eval_interval) == 0):
@@ -552,6 +708,10 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "mean_velocity_y": np.mean(metrics["velocities_y"]),
         "mean_velocity_z": np.mean(metrics["velocities_z"]),
         "mean_angular_vel_z": np.mean(metrics["angular_vel_z"]),
+        "mean_cmd_lin_vel_x": np.mean(metrics["cmd_lin_vel_x"]) if metrics["cmd_lin_vel_x"] else None,
+        "mean_cmd_lin_vel_y": np.mean(metrics["cmd_lin_vel_y"]) if metrics["cmd_lin_vel_y"] else None,
+        "mean_cmd_ang_vel_z": np.mean(metrics["cmd_ang_vel_z"]) if metrics["cmd_ang_vel_z"] else None,
+        "mean_cmd_heading": np.mean(metrics["cmd_heading"]) if metrics["cmd_heading"] else None,
         "mean_roll": np.mean(metrics["roll"]),
         "mean_pitch": np.mean(metrics["pitch"]),
         "mean_episode_length": np.mean(metrics["episode_lengths"]) if metrics["episode_lengths"] else num_steps,
@@ -589,6 +749,10 @@ def save_results_to_csv(all_results, output_path, timestamp):
             "mean_velocity_y",
             "mean_velocity_z",
             "mean_angular_vel_z",
+            "mean_cmd_lin_vel_x",
+            "mean_cmd_lin_vel_y",
+            "mean_cmd_ang_vel_z",
+            "mean_cmd_heading",
             "mean_roll",
             "mean_pitch",
             "mean_episode_length",
@@ -735,16 +899,30 @@ def main():
     # Get inference policy
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
-    # Optional HOYO reference cache
+    # Optional HOYO reference cache (enabled by default)
     teacher_cache = None
-    if args_cli.compute_hoyo_error:
+    styles_to_eval = ONOMATOPOEIA_LIST
+    if args_cli.style_list is not None:
+        styles_to_eval = [s.strip() for s in args_cli.style_list.split(",") if s.strip()]
+        if not styles_to_eval:
+            raise ValueError("style_list is empty after parsing. Provide at least one style.")
+        # Validate against known list (warn but allow)
+        unknown = [s for s in styles_to_eval if s not in ONOMATOPOEIA_LIST]
+        if unknown:
+            print(f"[WARN] Unknown styles requested: {unknown}. They will still be evaluated.")
+    compute_hoyo_error = True
+    if args_cli.no_hoyo_error:
+        compute_hoyo_error = False
+    elif args_cli.compute_hoyo_error:
+        compute_hoyo_error = True
+    if compute_hoyo_error:
         try:
             hoyo_root = Path(args_cli.hoyo_root) if args_cli.hoyo_root else (Path(NAVILA_ROOT) / "hoyo_v1_1")
             run_name = env.unwrapped.command_manager._terms["style_command"].style_module.run_name
             stats_path = resolve_norm_stats_path(hoyo_root, run_name)
             teacher_cache = build_hoyo_reference_cache(
                 hoyo_root=hoyo_root,
-                labels=ONOMATOPOEIA_LIST,
+                labels=styles_to_eval,
                 target_len=60,
                 samples_per_label=args_cli.hoyo_samples_per_label,
                 stats_path=stats_path,
@@ -771,13 +949,30 @@ def main():
     # Evaluate each onomatopoeia
     all_results = []
     interrupted = False
+    base_cmd_default = {
+        "lin_vel_x": args_cli.base_lin_vel_x,
+        "lin_vel_y": args_cli.base_lin_vel_y,
+        "ang_vel_z": args_cli.base_ang_vel_z,
+        "heading": args_cli.base_heading,
+    }
+    style_speed_table = load_style_speed_table(args_cli.style_speed_table, base_cmd_default)
 
     print("\n" + "="*60)
     print("STYLE EVALUATION PER ONOMATOPOEIA")
     print("="*60)
+    print(f"[INFO] Evaluating {len(styles_to_eval)} styles: {styles_to_eval}")
+    if compute_hoyo_error:
+        print("[INFO] HOYO error computation: enabled")
+    else:
+        print("[INFO] HOYO error computation: disabled")
+    if args_cli.base_velocity_mode != "env":
+        print(f"[INFO] base_velocity_mode={args_cli.base_velocity_mode}")
+        print(f"[INFO] base_velocity_default={base_cmd_default}")
+        if args_cli.base_velocity_mode == "style_table":
+            print(f"[INFO] style_speed_table entries={len(style_speed_table)}")
     
     try:
-        for onomatopoeia in ONOMATOPOEIA_LIST:
+        for onomatopoeia in styles_to_eval:
             print(f"\n--- Evaluating: {onomatopoeia} ---")
             
             # Video path for this onomatopoeia
@@ -797,11 +992,16 @@ def main():
                 hoyo_metric=args_cli.hoyo_metric,
                 hoyo_eval_interval=args_cli.hoyo_eval_interval,
                 hoyo_dtw_band=args_cli.hoyo_dtw_band,
+                base_velocity_mode=args_cli.base_velocity_mode,
+                base_cmd_default=base_cmd_default,
+                style_speed_table=style_speed_table,
             )
             
             all_results.append(summary)
             
             print(f"  Mean Vel X: {summary['mean_velocity_x']:.3f} ± {summary['std_velocity_x']:.3f}")
+            if summary.get("mean_cmd_lin_vel_x") is not None:
+                print(f"  Mean Cmd Vel X: {summary['mean_cmd_lin_vel_x']:.3f}")
             print(f"  Mean Angular Vel Z: {summary['mean_angular_vel_z']:.3f}")
             print(f"  Mean Roll: {summary['mean_roll']:.4f}")
             print(f"  Mean Pitch: {summary['mean_pitch']:.4f}")
@@ -838,10 +1038,12 @@ def main():
         print("\n" + "="*80)
         print("SUMMARY TABLE")
         print("="*80)
-        print(f"{'Onomatopoeia':<15} {'Vel X':>8} {'AngVel Z':>10} {'Roll':>8} {'Pitch':>8} {'TextSim':>10} {'CentrSim':>10}")
+        print(f"{'Onomatopoeia':<15} {'Vel X':>8} {'Cmd X':>8} {'AngVel Z':>10} {'Roll':>8} {'Pitch':>8} {'TextSim':>10} {'CentrSim':>10}")
         print("-"*80)
         for r in all_results:
-            print(f"{r['onomatopoeia']:<15} {r['mean_velocity_x']:>8.3f} {r['mean_angular_vel_z']:>10.3f} "
+            cmd_x = r.get("mean_cmd_lin_vel_x")
+            cmd_x_str = f"{cmd_x:>8.3f}" if cmd_x is not None else f"{'n/a':>8}"
+            print(f"{r['onomatopoeia']:<15} {r['mean_velocity_x']:>8.3f} {cmd_x_str} {r['mean_angular_vel_z']:>10.3f} "
                   f"{r['mean_roll']:>8.4f} {r['mean_pitch']:>8.4f} {r['mean_text_sim']:>10.4f} {r['mean_centroid_sim']:>10.4f}")
     
     # Close environment

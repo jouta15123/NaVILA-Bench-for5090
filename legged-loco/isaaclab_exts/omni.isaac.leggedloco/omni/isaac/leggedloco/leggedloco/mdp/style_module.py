@@ -58,11 +58,20 @@ class StyleModule:
         self.coord_mode = coord_mode
         if self.coord_mode not in ("legacy_xz_yaw", "hoyo_front"):
             raise ValueError(f"Unsupported coord_mode: {self.coord_mode}")
+
+        # Head/neck estimation ratios from HOYO stats (hs/hf, ns/hf).
+        # Allow override via env vars if needed.
+        self.head_shoulder_ratio = float(os.environ.get("HOYO_HEAD_SHOULDER_RATIO", "0.2375"))
+        self.neck_shoulder_ratio = float(os.environ.get("HOYO_NECK_SHOULDER_RATIO", "0.0639"))
+
+        # Text embedding device (default CPU to avoid GPU OOM when running RL)
+        self.text_device = torch.device(os.environ.get("STYLE_TEXT_DEVICE", "cpu"))
         
         # Load Checkpoints
         self._load_models()
         self._load_centroids()
         self._load_norm_stats()
+        self._precompute_text_latents()
         
         # Motion Buffer: (num_envs, buffer_len, 14, 3)
         # We initialize with zeros or some default pose
@@ -85,6 +94,13 @@ class StyleModule:
         # Track warmup state per environment
         self.warmup_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.warmup_frames = 60  # Need at least 60 frames before valid reward
+        
+        # Fixed scale reference per environment (nan = uninitialized)
+        self.scale_ref = torch.full((self.num_envs,), float("nan"), device=self.device)
+        self.scale_ema = 0.99  # EMA coefficient for scale update
+        self.scale_min = 0.8   # Minimum valid scale (clamp)
+        self.scale_max = 2.2   # Maximum valid scale (clamp)
+        self.scale_healthy_threshold = 1.0  # Minimum head-feet dist to consider "standing"
 
     def reset_buffer(self, env_ids=None):
         """
@@ -98,10 +114,12 @@ class StyleModule:
             self.motion_buffer.zero_()
             self.heading_buffer.zero_()
             self.warmup_counter.zero_()
+            self.scale_ref.fill_(float("nan"))
         else:
             self.motion_buffer[env_ids] = 0
             self.heading_buffer[env_ids] = 0
             self.warmup_counter[env_ids] = 0
+            self.scale_ref[env_ids] = float("nan")
 
     def _load_models(self):
         # ... (Same as before)
@@ -143,6 +161,28 @@ class StyleModule:
         for p in self.sem_proj.parameters():
             p.requires_grad = False
 
+    def _precompute_text_latents(self):
+        """Precompute z_onm for all known styles to avoid repeated text encoder loads."""
+        self._z_onm_cache = {}
+        if encode_semantics_sarashina is None or len(INSTRUCTION_ONOMATOPEIA) == 0:
+            return
+        try:
+            emb = encode_semantics_sarashina(INSTRUCTION_ONOMATOPEIA, self.text_device)
+            # Align embedding dimensionality with sem_proj input (handles mocked encoders)
+            in_feat = self.sem_proj.in_features
+            if emb.shape[1] != in_feat:
+                if emb.shape[1] > in_feat:
+                    emb = emb[:, :in_feat]
+                else:
+                    pad = torch.zeros(emb.shape[0], in_feat - emb.shape[1], device=emb.device, dtype=emb.dtype)
+                    emb = torch.cat([emb, pad], dim=1)
+            emb = emb.to(self.device)
+            z_onm = F.normalize(self.sem_proj(emb), dim=-1)
+            for idx, label in enumerate(INSTRUCTION_ONOMATOPEIA):
+                self._z_onm_cache[label] = z_onm[idx : idx + 1]
+        except Exception as e:
+            print(f"Warning: Failed to precompute text latents: {e}")
+
     def _load_centroids(self):
         # ... (Same as before)
         snapshot_path = self.root_dir / "latent_snapshot_final.npz"
@@ -163,22 +203,27 @@ class StyleModule:
 
     def _load_norm_stats(self):
         # Priority: run-specific > global joint_training_results > data directory
-        self.norm_path = self.root_dir / "normalization_stats.json"
-        if not self.norm_path.exists():
-            self.norm_path = NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / "normalization_stats.json"
-        if not self.norm_path.exists():
-            self.norm_path = self.root_dir.parent.parent / "data" / "normalization_stats.json"
+        candidates = [
+            self.root_dir / "normalization_stats.json",
+            NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / "normalization_stats.json",
+            NAVILA_ROOT / "hoyo_v1_1" / "data" / "normalization_stats.json",
+        ]
+        self.norm_path = None
+        for path in candidates:
+            if path.exists():
+                self.norm_path = path
+                break
         
         self.mean = None
         self.std = None
-        if self.norm_path.exists():
+        if self.norm_path is not None and self.norm_path.exists():
             import json
             with open(self.norm_path, "r") as f:
                 stats = json.load(f)
                 self.mean = torch.tensor(stats["mean"], device=self.device, dtype=torch.float32)
                 self.std = torch.tensor(stats["std"], device=self.device, dtype=torch.float32)
         else:
-            print(f"Warning: Normalization stats not found at {self.norm_path}. Using defaults.")
+            print("Warning: Normalization stats not found. Using defaults.")
             # Default values estimated from HOYO data (approx)
             self.mean = torch.tensor([0.0, 0.0], device=self.device, dtype=torch.float32)
             self.std = torch.tensor([0.2, 0.2], device=self.device, dtype=torch.float32)
@@ -186,17 +231,21 @@ class StyleModule:
     @torch.no_grad()
     def encode_instruction(self, text: str):
         # ... (Same as before)
-        emb = encode_semantics_sarashina([text], self.device)
-        # Align embedding dimensionality with sem_proj input (handles mocked encoders)
-        in_feat = self.sem_proj.in_features
-        if emb.shape[1] != in_feat:
-            if emb.shape[1] > in_feat:
-                emb = emb[:, :in_feat]
-            else:
-                pad = torch.zeros(emb.shape[0], in_feat - emb.shape[1], device=emb.device, dtype=emb.dtype)
-                emb = torch.cat([emb, pad], dim=1)
-        z_onm = self.sem_proj(emb)
-        z_onm = F.normalize(z_onm, dim=-1)
+        if text in getattr(self, "_z_onm_cache", {}):
+            z_onm = self._z_onm_cache[text]
+        else:
+            emb = encode_semantics_sarashina([text], self.text_device)
+            # Align embedding dimensionality with sem_proj input (handles mocked encoders)
+            in_feat = self.sem_proj.in_features
+            if emb.shape[1] != in_feat:
+                if emb.shape[1] > in_feat:
+                    emb = emb[:, :in_feat]
+                else:
+                    pad = torch.zeros(emb.shape[0], in_feat - emb.shape[1], device=emb.device, dtype=emb.dtype)
+                    emb = torch.cat([emb, pad], dim=1)
+            emb = emb.to(self.device)
+            z_onm = self.sem_proj(emb)
+            z_onm = F.normalize(z_onm, dim=-1)
         
         if text in self.label_to_id:
             lab_idx = self.label_to_id[text]
@@ -222,7 +271,7 @@ class StyleModule:
             
             # Default Mapping (matches experiment_summary.md documentation)
             map_dict = {
-                "head": "torso_link",  # Head approximated with torso_link + offset [0.0, 0.0, 0.25]
+                "head": "torso_link",  # Head approximated with torso_link (offset applied)
                 "neck": "torso_link",  # Neck approximated with torso_link
                 "r_shoulder": "right_shoulder_pitch_link",
                 "r_elbow": "right_elbow_link",
@@ -241,6 +290,8 @@ class StyleModule:
             # Override with JSON config if available (configs/h1_to_hoyo_mapping.json)
             if self.mapping_dict is not None:
                 map_dict.update(self.mapping_dict)
+            # Cache resolved mapping for later use (e.g., head/neck estimation)
+            self._resolved_map_dict = map_dict
                 
             # HOYO order with indices
             # 0: Head, 1: Neck, 2: R-Shoulder, 3: R-Elbow, 4: R-Hand
@@ -292,13 +343,13 @@ class StyleModule:
             # - Head above torso: ~0.25m, Neck: ~0.15m
             self.body_offsets = torch.zeros(14, 3, device=self.device)
             
-            # Head offset (above torso)
+            # Head/neck offsets (above torso)
+            # NOTE: actual head/neck positions are estimated from shoulder mid later when missing.
             if "head" in self._missing_joints or ("torso" in map_dict["head"] and "head" not in map_dict["head"]):
-                self.body_offsets[0] = torch.tensor([0.0, 0.0, 0.30], device=self.device)  # +Z for Head (30cm above torso)
+                self.body_offsets[0] = torch.tensor([0.0, 0.0, 0.85], device=self.device)
             
-            # Neck offset (slightly above torso)
             if "neck" in self._missing_joints or ("torso" in map_dict["neck"]):
-                self.body_offsets[1] = torch.tensor([0.0, 0.0, 0.15], device=self.device)  # +Z for Neck (15cm above torso)
+                self.body_offsets[1] = torch.tensor([0.0, 0.0, 0.52], device=self.device)
             
             # Right arm chain (if shoulders are missing, offset from torso)
             if "r_shoulder" in self._missing_joints:
@@ -342,6 +393,33 @@ class StyleModule:
              
              hoyo_3d = hoyo_3d + offsets_rot
             
+        # Estimate head/neck from shoulder mid if actual head/neck links are missing.
+        # h = r/(1-r) * (shoulder_z - feet_z)
+        map_dict = getattr(self, "_resolved_map_dict", self.mapping_dict or {})
+        if (
+            ("head" in self._missing_joints)
+            or ("neck" in self._missing_joints)
+            or ("torso" in map_dict.get("head", ""))
+        ):
+            if not any(k in self._missing_joints for k in ("r_shoulder", "l_shoulder", "r_ankle", "l_ankle")):
+                r_sh = hoyo_3d[:, 2, :]
+                l_sh = hoyo_3d[:, 5, :]
+                shoulder_mid = 0.5 * (r_sh + l_sh)
+                r_ank = hoyo_3d[:, 10, :]
+                l_ank = hoyo_3d[:, 13, :]
+                feet_mid = 0.5 * (r_ank + l_ank)
+                d = shoulder_mid[:, 2] - feet_mid[:, 2]
+                d = torch.clamp(d, min=1e-6)
+                h_off = (self.head_shoulder_ratio / (1.0 - self.head_shoulder_ratio)) * d
+                n_off = (self.neck_shoulder_ratio / (1.0 - self.neck_shoulder_ratio)) * d
+
+                # Head
+                hoyo_3d[:, 0, 0:2] = shoulder_mid[:, 0:2]
+                hoyo_3d[:, 0, 2] = shoulder_mid[:, 2] + h_off
+                # Neck
+                hoyo_3d[:, 1, 0:2] = shoulder_mid[:, 0:2]
+                hoyo_3d[:, 1, 2] = shoulder_mid[:, 2] + n_off
+
         return hoyo_3d # (B, 14, 3)
 
     def update_buffer(self, body_pos_w, root_quat_w, body_names, body_quat_w=None):
@@ -377,10 +455,13 @@ class StyleModule:
         self.warmup_counter = torch.clamp(self.warmup_counter + 1, max=self.warmup_frames)
 
     @torch.no_grad()
+    @torch.no_grad()
     def _prepare_centered_2d(
         self,
         apply_yaw_correction: bool = False,
         coord_mode: str | None = None,
+        standardize: bool = True,
+        normalize_height: bool = True,
     ) -> torch.Tensor:
         """
         Prepare motion buffer in the same 2D format used for MotionCLIP/HOYO.
@@ -388,19 +469,14 @@ class StyleModule:
         HOYO前処理に準拠:
         1. 初期フレームの重心でセンタリング
         2. 3D→2D投影: [Y(左右), Z(上下)] → [x, y] (HOYO正面視点座標系)
-        3. 身長正規化 (頭〜足の距離)
+        3. 身長正規化 (頭〜足の距離) - normalize_height=Trueの場合のみ
         4. 標準化 (mean/std)
-
-        注意: HOYOは正面視点（frontal view）で撮影されているため、
-              H1の[Y_lat, Z_up]がHOYOの[x, y]に対応する。
-              - HOYO x（水平）= H1 Y軸（左右方向）
-              - HOYO y（垂直）= H1 Z軸（上下方向）
-              正規化統計(normalization_stats.json)はYaw補正なしで計算されているため、
-              apply_yaw_correction=Falseがデフォルト。
 
         Args:
             apply_yaw_correction: Yaw補正を適用するかどうか（hoyo_frontモードのみ有効）。
             coord_mode: "legacy_xz_yaw" or "hoyo_front". If None, uses self.coord_mode.
+            standardize: Whether to apply mean/std normalization.
+            normalize_height: Whether to apply height normalization (default True). Set False for raw meter visualization.
 
         Returns:
             (B, T, 14, 2) shaped tensor in [x, y] order matching HOYO format.
@@ -439,7 +515,7 @@ class StyleModule:
             centered = centered / scale_bc
 
             # 5. Normalize (mean/std)
-            if self.mean is not None:
+            if standardize and self.mean is not None:
                 if self.mean.numel() == 2:
                     mean = self.mean.view(1, 1, 1, 2)
                     std = self.std.view(1, 1, 1, 2)
@@ -451,15 +527,20 @@ class StyleModule:
             return centered
 
         # Default: HOYO frontal projection
-        # 1. Frame 0のCoMでセンタリング
-        com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
-        centered_3d = self.motion_buffer - com_0
+        # 1. Per-frame Pelvis Centering (translation invariant)
+        # Pelvis = midpoint of R-Hip(8) and L-Hip(11)
+        r_hip = self.motion_buffer[:, :, 8, :]   # (B, T, 3)
+        l_hip = self.motion_buffer[:, :, 11, :]  # (B, T, 3)
+        pelvis = 0.5 * (r_hip + l_hip)           # (B, T, 3)
+        centered_3d = self.motion_buffer - pelvis[:, :, None, :]  # (B, T, 14, 3)
 
         # 2. (Optional) Yaw補正 - デフォルトはOFF（HOYO正規化統計に合わせる）
         if apply_yaw_correction:
-            yaw_0 = self.heading_buffer[:, 0]  # (B,)
-            c = torch.cos(-yaw_0).view(-1, 1, 1, 1)
-            s = torch.sin(-yaw_0).view(-1, 1, 1, 1)
+            # User Feedback: Use per-frame yaw to maintain "always frontal" view even during turns.
+            yaw = self.heading_buffer  # (B, T)
+            # Broadcast to (B, T, 1, 1) for (B, T, 14, 1) position data
+            c = torch.cos(-yaw).view(yaw.shape[0], yaw.shape[1], 1, 1)
+            s = torch.sin(-yaw).view(yaw.shape[0], yaw.shape[1], 1, 1)
 
             x = centered_3d[..., 0:1]
             y = centered_3d[..., 1:2]
@@ -471,32 +552,54 @@ class StyleModule:
 
         # 3. 3D→2D投影: H1[Y(左右), Z(上下)] → HOYO正面視点 [x, y]
         # HOYO座標系（画像座標系、frontビュー、swap後）:
-        #   - HOYO x: 右向き正（画像の水平方向）
+        #   - HOYO x: 被写体の左が正（画像の水平方向）
         #   - HOYO y: 下向き正（画像の垂直方向）
         # H1座標系:
-        #   - H1 Y: 左向き正（被写体の左が正）
+        #   - H1 Y: ロボットの左が正
         #   - H1 Z: 上向き正
-        # マッピング（両軸とも符号反転が必要）:
-        #   - HOYO x = -H1 Y（右向き正 ← 左向き正）
+        # マッピング:
+        #   - HOYO x = +H1 Y（左向き正をそのまま使用）
         #   - HOYO y = -H1 Z（下向き正 ← 上向き正）
         y_lat = centered_3d[..., 1:2]  # H1 Y: 左向き正
         z_up = centered_3d[..., 2:3]   # H1 Z: 上向き正
-        centered = torch.cat([-y_lat, -z_up], dim=-1)
+        centered = torch.cat([y_lat, -z_up], dim=-1)
 
-        # 4. 身長正規化（HOYOと同じ方法: 頭〜足の距離で正規化）
-        head_pos = centered[:, :, 0, :]   # (B, T, 2) - head
-        r_ankle = centered[:, :, 10, :]   # (B, T, 2) - right ankle
-        l_ankle = centered[:, :, 13, :]   # (B, T, 2) - left ankle
-        feet_mid = 0.5 * (r_ankle + l_ankle)
+        # 4. 身長正規化（Fixed Scale with EMA + healthy guard）
+        if normalize_height:
+            head_pos = centered[:, :, 0, :]   # (B, T, 2) - head
+            r_ankle = centered[:, :, 10, :]   # (B, T, 2) - right ankle
+            l_ankle = centered[:, :, 13, :]   # (B, T, 2) - left ankle
+            feet_mid = 0.5 * (r_ankle + l_ankle)
 
-        heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
-        scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
-        scale = torch.maximum(scale, torch.tensor(1e-6, device=self.device))
-        scale_bc = scale.view(-1, 1, 1, 1)
-        centered = centered / scale_bc
+            # Current height per env (mean over time)
+            heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
+            curr_scale = heights.mean(dim=1)  # (B,)
+            curr_scale = curr_scale.clamp(self.scale_min, self.scale_max)
+
+            # Identify envs needing init vs update
+            need_init = torch.isnan(self.scale_ref)
+            # Healthy = standing (head-feet dist > threshold)
+            healthy = (curr_scale > self.scale_healthy_threshold)
+
+            # Initialize: only healthy envs
+            init_mask = need_init & healthy
+            self.scale_ref[init_mask] = curr_scale[init_mask]
+
+            # EMA update: initialized & healthy envs only
+            upd_mask = (~need_init) & healthy
+            self.scale_ref[upd_mask] = (
+                self.scale_ema * self.scale_ref[upd_mask]
+                + (1.0 - self.scale_ema) * curr_scale[upd_mask]
+            )
+
+            # Use scale_ref for normalization (fallback to curr_scale if still nan)
+            scale = torch.where(torch.isnan(self.scale_ref), curr_scale, self.scale_ref)
+            scale = torch.maximum(scale, torch.tensor(self.scale_min, device=self.device))
+            scale_bc = scale.view(-1, 1, 1, 1)
+            centered = centered / scale_bc
 
         # 5. 標準化 (mean/std) - HOYO正規化統計を使用
-        if self.mean is not None:
+        if standardize and self.mean is not None:
             if self.mean.numel() == 2:
                 mean = self.mean.view(1, 1, 1, 2)
                 std = self.std.view(1, 1, 1, 2)
@@ -527,6 +630,24 @@ class StyleModule:
         return self._prepare_centered_2d(apply_yaw_correction=False, coord_mode=self.coord_mode)
 
     @torch.no_grad()
+    def get_hoyo_compatible_keymap(self, standardize: bool = True, normalize_height: bool = True) -> torch.Tensor:
+        """
+        Get the current motion buffer as a HOYO-compatible 2D keymap with rotation invariance.
+        This aligns the robot's heading to the keymap's 'forward' (or lateral) axis.
+
+        Args:
+            standardize: Whether to apply mean/std normalization.
+            normalize_height: Whether to apply height normalization. Set False for raw meter visualization.
+
+        Returns:
+            (B, T, 14, 2) shaped tensor in [Lateral, Up] order.
+            Lateral: Robot's Left direction
+            Up: Robot's Down direction (HOYO image coordinates)
+        """
+        # Enable Yaw correction to ensure rotation invariance
+        return self._prepare_centered_2d(apply_yaw_correction=True, coord_mode=self.coord_mode, standardize=standardize, normalize_height=normalize_height)
+
+    @torch.no_grad()
     def encode_buffer(self):
         """
         Encodes the current buffer into style latent using MotionCLIP.
@@ -534,13 +655,14 @@ class StyleModule:
         HOYO前処理に準拠（正面視点座標系）:
         - 初期フレーム中心化
         - 身長正規化
-        - [Y_lat, Z_up] → [x, y]座標変換（Yaw補正なし）
+        - [Y_lat, Z_up] → [x, y]座標変換（Yaw補正あり）
         - 標準化 (mean/std)
 
         Returns:
             (B, 512) shaped tensor of normalized motion latents.
         """
-        centered = self._prepare_centered_2d(apply_yaw_correction=False, coord_mode=self.coord_mode)
+        # Apply Yaw correction for rotation invariant style reward
+        centered = self._prepare_centered_2d(apply_yaw_correction=True, coord_mode=self.coord_mode)
 
         # MotionCLIP expects (B, 14, 2, T)
         x = centered.permute(0, 2, 3, 1)  # (B, 14, 2, 60)

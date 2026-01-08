@@ -1,0 +1,13 @@
+You are a musicologist and performance expert.
+Analyze the following musical piece to provide context for an AI performance renderer.
+
+Title: {{ title }}
+Composer: {{ composer }}
+
+Output a JSON object with the following fields:
+1. "background": A brief description of the piece's history and mood (Focus on emotional character).
+2. "keywords": A list of 5-7 adjectives describing the typical performance style (e.g., "Baroque, steady, contrapuntal" or "Romantic, rubato, heavy").
+3. "famous_pianists": Names of 2-3 famous performers known for this piece (for style reference).
+4. "performance_advice": Specific advice for an AI renderer (e.g., "Keep the tempo strict" or "Use heavy rubato in the melody").
+
+Format: JSON only.

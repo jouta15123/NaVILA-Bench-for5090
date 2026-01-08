@@ -81,14 +81,17 @@ def build_cmd(
     batch_size: int,
     seed: int,
     contrastive_mode: str,
+    best_metric: str,
     lambda_contrastive: float,
     lambda_vae: float,
     temp: float,
     lr: float,
     lr_encoder: float,
     lr_decoder: float,
+    weight_decay: float,
+    wandb_args: list[str] | None = None,
 ):
-    return [
+    cmd = [
         sys.executable,
         str(TRAIN_SCRIPT),
         "--stage",
@@ -107,6 +110,8 @@ def build_cmd(
         str(lr_encoder),
         "--lr-decoder",
         str(lr_decoder),
+        "--weight-decay",
+        str(weight_decay),
         "--lambda-contrastive",
         str(lambda_contrastive),
         "--lambda-vae",
@@ -115,6 +120,8 @@ def build_cmd(
         str(temp),
         "--contrastive-mode",
         contrastive_mode,
+        "--best-metric",
+        best_metric,
         "--log-interval",
         "500",
         "--eval-interval",
@@ -124,6 +131,9 @@ def build_cmd(
         "--run-name",
         run_name,
     ]
+    if wandb_args:
+        cmd.extend(wandb_args)
+    return cmd
 
 
 def run_stage(
@@ -227,27 +237,24 @@ def objective(trial: optuna.Trial, args) -> float:
     Returns the M→T R@1 (to be maximized).
     """
     # Hyperparameters to search (full stage only)
-    # --narrow-search: デフォルト設定中心の狭い探索範囲
-    # Default values from train_motionclip_joint.py:
-    #   lambda_contrastive=0.1, lambda_vae=1.0, temp=0.07
-    #   lr=1e-5, lr_encoder=1e-5, lr_decoder=1e-5
+    # Fixed values (per user request)
+    lambda_contrastive = args.lambda_contrastive
+    lambda_vae = args.lambda_vae
+
+    # Search ranges
     if args.narrow_search:
-        # 46%達成時の設定を中心に非常に狭い範囲で探索
-        # 参考: lr=5e-5, lr_encoder=2e-5, lr_decoder=2e-5
-        #       lambda_contrastive=0.1, lambda_vae=1.0, temp=0.07
-        lambda_contrastive = trial.suggest_float("lambda_contrastive", 0.07, 0.15, log=True)  # 中心0.1
-        lambda_vae = trial.suggest_float("lambda_vae", 0.7, 1.5, log=True)  # 中心1.0
-        temp = trial.suggest_float("temp", 0.05, 0.1, log=True)  # 中心0.07
-        lr = trial.suggest_float("lr", 3e-5, 8e-5, log=True)  # 中心5e-5
-        lr_encoder = trial.suggest_float("lr_encoder", 1.5e-5, 3e-5, log=True)  # 中心2e-5
-        lr_decoder = trial.suggest_float("lr_decoder", 1.5e-5, 3e-5, log=True)  # 中心2e-5
+        # Narrow ranges around typical good values
+        lr = trial.suggest_float("lr", 3e-5, 1e-4, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-4, 5e-3, log=True)
+        temp = trial.suggest_float("temp", 0.05, 0.1, log=True)
     else:
-        lambda_contrastive = trial.suggest_float("lambda_contrastive", 0.1, 2.0, log=True)
-        lambda_vae = trial.suggest_float("lambda_vae", 0.1, 2.0, log=True)
-        temp = trial.suggest_float("temp", 0.03, 0.2, log=True)
-        lr = trial.suggest_float("lr", 1e-5, 1e-4, log=True)
-        lr_encoder = trial.suggest_float("lr_encoder", 5e-6, 5e-5, log=True)
-        lr_decoder = trial.suggest_float("lr_decoder", 5e-6, 5e-5, log=True)
+        lr = trial.suggest_float("lr", 1e-5, 3e-4, log=True)
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
+        temp = trial.suggest_float("temp", 0.02, 0.2, log=True)
+
+    # Tie encoder/decoder LR to main LR for simplicity
+    lr_encoder = lr
+    lr_decoder = lr
     contrastive_mode = args.contrastive_mode
 
     # Fixed parameters
@@ -274,6 +281,19 @@ def objective(trial: optuna.Trial, args) -> float:
     if metrics_file.exists():
         metrics_file.unlink()
 
+    # Build wandb args (optional)
+    wandb_args = []
+    if args.wandb:
+        wandb_args.append("--wandb")
+        if args.wandb_project:
+            wandb_args.extend(["--wandb-project", args.wandb_project])
+        if args.wandb_entity:
+            wandb_args.extend(["--wandb-entity", args.wandb_entity])
+        if args.wandb_group:
+            wandb_args.extend(["--wandb-group", args.wandb_group])
+    if not wandb_args:
+        wandb_args = None
+
     # Build command per stage
     freeze_cmd = build_cmd(
         stage="freeze",
@@ -282,12 +302,15 @@ def objective(trial: optuna.Trial, args) -> float:
         batch_size=batch_size,
         seed=seed,
         contrastive_mode=contrastive_mode,
+        best_metric=args.best_metric,
         lambda_contrastive=lambda_contrastive,
         lambda_vae=lambda_vae,
         temp=temp,
         lr=lr,
         lr_encoder=lr_encoder,
         lr_decoder=lr_decoder,
+        weight_decay=weight_decay,
+        wandb_args=wandb_args,
     )
     full_cmd = build_cmd(
         stage="full",
@@ -296,19 +319,23 @@ def objective(trial: optuna.Trial, args) -> float:
         batch_size=batch_size,
         seed=seed,
         contrastive_mode=contrastive_mode,
+        best_metric=args.best_metric,
         lambda_contrastive=lambda_contrastive,
         lambda_vae=lambda_vae,
         temp=temp,
         lr=lr,
         lr_encoder=lr_encoder,
         lr_decoder=lr_decoder,
+        weight_decay=weight_decay,
+        wandb_args=wandb_args,
     )
 
     print(f"\n{'='*60}")
     print(f"Trial {trial.number}")
     print(
         f"Params: lambda_c={lambda_contrastive:.3f}, lambda_v={lambda_vae:.3f}, "
-        f"temp={temp:.4f}, mode={contrastive_mode}, steps(full)={full_steps}"
+        f"lr={lr:.2e}, wd={weight_decay:.2e}, temp={temp:.4f}, "
+        f"mode={contrastive_mode}, steps(full)={full_steps}"
     )
     print(f"{'='*60}\n")
 
@@ -420,17 +447,38 @@ def main():
         help="Contrastive loss type (fixed across trials).",
     )
     parser.add_argument(
+        "--best-metric",
+        type=str,
+        choices=["acc@1", "m2t_r@1", "t2m_r@1", "avg_r@1"],
+        default="m2t_r@1",
+        help="Metric used to select the best checkpoint during training.",
+    )
+    parser.add_argument(
+        "--lambda-contrastive",
+        type=float,
+        default=0.3,
+        help="Fixed contrastive loss weight (lc).",
+    )
+    parser.add_argument(
+        "--lambda-vae",
+        type=float,
+        default=1.0,
+        help="Fixed VAE loss weight.",
+    )
+    parser.add_argument(
         "--silhouette-weight",
         type=float,
         default=0.1,
         help="Weight for silhouette in objective: objective = m2t_r1 + w * silhouette",
     )
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--wandb-project", type=str, default=None, help="W&B project name")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (user or team)")
+    parser.add_argument("--wandb-group", type=str, default=None, help="W&B group name")
     parser.add_argument(
         "--narrow-search",
         action="store_true",
-        help="Use very narrow search ranges centered on 46%% baseline "
-        "(lambda_c=0.07-0.15, lambda_vae=0.7-1.5, temp=0.05-0.1, "
-        "lr=3e-5-8e-5, lr_enc/dec=1.5e-5-3e-5)",
+        help="Use narrow search ranges (lr=3e-5-1e-4, wd=1e-4-5e-3, temp=0.05-0.1)",
     )
     args = parser.parse_args()
     args.run_freeze = not args.no_freeze

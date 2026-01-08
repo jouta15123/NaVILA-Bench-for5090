@@ -49,6 +49,7 @@ class CustomPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     base_policy_checkpoint: str = None
     style_dim: int = 512
     residual_scale: float = 0.1
+    unfreeze_base_last_layer: bool = False
 
 @configclass
 class H1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):

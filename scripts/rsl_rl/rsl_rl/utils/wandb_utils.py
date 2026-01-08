@@ -8,8 +8,10 @@ from dataclasses import asdict
 from torch.utils.tensorboard import SummaryWriter
 
 # Avoid git ownership errors inside mounted dirs (CI/docker). Do this *before* importing wandb.
-os.environ.setdefault("WANDB_IGNORE_GIT", "true")
-os.environ.setdefault("WANDB_DISABLE_CODE", "true")
+# Use hard-set to override external envs that might keep git enabled.
+os.environ["WANDB_DISABLE_GIT"] = "true"
+os.environ["WANDB_IGNORE_GIT"] = "true"
+os.environ["WANDB_DISABLE_CODE"] = "true"
 
 try:
     import wandb
@@ -41,10 +43,14 @@ class WandbSummaryWriter(SummaryWriter):
 
         # Also pass settings to disable git/code scanning explicitly.
         # wandb 0.12.* doesn't accept _disable_git/_disable_code in settings; rely on env flags.
-        wandb.init(project=project, entity=entity, tags=tags, group=group, job_type=job_type)
-
-        # Change generated name to project-number format
-        wandb.run.name = project + wandb.run.name.split("-")[-1]
+        self._wandb_enabled = False
+        try:
+            wandb.init(project=project, entity=entity, tags=tags, group=group, job_type=job_type)
+            # Change generated name to project-number format
+            wandb.run.name = project + wandb.run.name.split("-")[-1]
+            self._wandb_enabled = True
+        except Exception as e:
+            print(f"[WARN] W&B disabled (init failed): {e}")
 
         self.name_map = {
             "Train/mean_reward/time": "Train/mean_reward_time",
@@ -53,7 +59,8 @@ class WandbSummaryWriter(SummaryWriter):
 
         run_name = os.path.split(log_dir)[-1]
 
-        wandb.log({"log_dir": run_name})
+        if self._wandb_enabled:
+            wandb.log({"log_dir": run_name})
 
     def store_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
         wandb.config.update({"runner_cfg": runner_cfg})
@@ -75,16 +82,21 @@ class WandbSummaryWriter(SummaryWriter):
             walltime=walltime,
             new_style=new_style,
         )
-        wandb.log({self._map_path(tag): scalar_value}, step=global_step)
+        if self._wandb_enabled:
+            wandb.log({self._map_path(tag): scalar_value}, step=global_step)
 
     def stop(self):
-        wandb.finish()
+        if self._wandb_enabled:
+            wandb.finish()
 
     def log_config(self, env_cfg, runner_cfg, alg_cfg, policy_cfg):
-        self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
+        if self._wandb_enabled:
+            self.store_config(env_cfg, runner_cfg, alg_cfg, policy_cfg)
 
     def save_model(self, model_path, iter):
-        wandb.save(model_path, base_path=os.path.dirname(model_path))
+        if self._wandb_enabled:
+            wandb.save(model_path, base_path=os.path.dirname(model_path))
 
     def save_file(self, path, iter=None):
-        wandb.save(path, base_path=os.path.dirname(path))
+        if self._wandb_enabled:
+            wandb.save(path, base_path=os.path.dirname(path))

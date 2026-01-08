@@ -283,7 +283,7 @@ def track_lin_vel_xy_exp(
     # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     small_commands = torch.norm(env.command_manager.get_command(command_name)[:, :2], dim=-1) < 0.1
-    track_commands = env.command_manager.get_command(command_name)[:, :2] * (~small_commands)
+    track_commands = env.command_manager.get_command(command_name)[:, :2] * (~small_commands).unsqueeze(-1)
     # compute the error
     lin_vel_error = torch.sum(
         torch.square(track_commands - asset.data.root_lin_vel_b[:, :2]), 
@@ -306,6 +306,44 @@ def track_ang_vel_z_exp(
     # compute the error
     ang_vel_error = torch.square(env.command_manager.get_command(command_name)[:, 2] - asset.data.root_ang_vel_b[:, 2])
     return torch.exp(-ang_vel_error / std**2)
+
+def track_heading_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of heading (yaw angle) using exponential kernel.
+
+    Note: コマンドのheading_targetに追従する。heading_targetが存在しない場合は0を返す。
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    cmd_term = env.command_manager.get_term(command_name)
+    if not hasattr(cmd_term, "heading_target"):
+        return torch.zeros(env.num_envs, device=env.device)
+    heading_error = math_utils.wrap_to_pi(cmd_term.heading_target - asset.data.heading_w)
+    reward = torch.exp(-torch.square(heading_error) / std**2)
+    if hasattr(cmd_term, "is_heading_env"):
+        reward = reward * cmd_term.is_heading_env.float()
+    return reward
+
+
+# === 追加 (2026-01-06): シンプルなworld heading追従報酬 ===
+# 旧: track_heading_exp はコマンドのheading_targetに依存
+# 新: track_heading_world_exp は固定のtarget_headingに追従（コマンド依存なし）
+def track_heading_world_exp(
+    env: ManagerBasedRLEnv, std: float, target_heading: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of a fixed world heading using exponential kernel.
+
+    Args:
+        std: Standard deviation for exponential kernel.
+        target_heading: Target heading in world frame (radians). 0.0 = world X正方向.
+
+    Returns:
+        Reward tensor (1.0 when heading matches target, decreasing with error).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    heading_error = math_utils.wrap_to_pi(asset.data.heading_w - target_heading)
+    return torch.exp(-torch.square(heading_error) / std**2)
 
 def feet_air_time(env: ManagerBasedRLEnv, command_name: str, sensor_cfg: SceneEntityCfg, threshold: float) -> torch.Tensor:
     """Reward long steps taken by the feet using L2-kernel.

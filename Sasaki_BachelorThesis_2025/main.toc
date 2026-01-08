@@ -1,0 +1,50 @@
+\contentsline {chapter}{\numberline {第1章}序論}{1}{}%
+\contentsline {section}{\numberline {1.1}背景と目的}{1}{}%
+\contentsline {subsection}{\numberline {1.1.1}創造的活動におけるAIのパラダイムシフト}{1}{}%
+\contentsline {subsection}{\numberline {1.1.2}一方的な命令から双方向の共創へ}{1}{}%
+\contentsline {section}{\numberline {1.2}音楽生成における課題：可視化の壁と時間性}{2}{}%
+\contentsline {subsection}{\numberline {1.2.1}可視性と一覧性の欠如}{2}{}%
+\contentsline {subsection}{\numberline {1.2.2}時間軸上の不可逆性と文脈依存性}{3}{}%
+\contentsline {subsection}{\numberline {1.2.3}感性語の曖昧性と解釈の主観性}{3}{}%
+\contentsline {section}{\numberline {1.3}本研究のアプローチ}{4}{}%
+\contentsline {subsection}{\numberline {1.3.1}Human-in-the-loopによる感性のすり合わせ}{4}{}%
+\contentsline {subsection}{\numberline {1.3.2}意味的インタラクションのループ}{4}{}%
+\contentsline {section}{\numberline {1.4}本論文の構成}{4}{}%
+\contentsline {chapter}{\numberline {第2章}理論・関連研究}{6}{}%
+\contentsline {section}{\numberline {2.1}創造的パートナーシップ}{6}{}%
+\contentsline {subsection}{\numberline {2.1.1}エージェントの言語理解と感性}{6}{}%
+\contentsline {subsection}{\numberline {2.1.2}エージェントとの共創と適応学習}{6}{}%
+\contentsline {subsubsection}{\numberline {2.1.2.1}In-context Learning (ICL)}{7}{}%
+\contentsline {subsubsection}{\numberline {2.1.2.2}In-context Preference Learning (ICPL)}{7}{}%
+\contentsline {subsection}{\numberline {2.1.3}AIによる代替と人間の主体性}{7}{}%
+\contentsline {subsubsection}{\numberline {2.1.3.1}主体性を尊重した最適化支援}{7}{}%
+\contentsline {subsubsection}{\numberline {2.1.3.2}LLMとの共創における課題}{8}{}%
+\contentsline {section}{\numberline {2.2}音楽生成における制御と演奏レンダリング}{9}{}%
+\contentsline {subsection}{\numberline {2.2.1}音楽生成モデルの動向と制御性}{9}{}%
+\contentsline {subsection}{\numberline {2.2.2}演奏レンダリング (Performance Rendering)}{10}{}%
+\contentsline {subsection}{\numberline {2.2.3}RenderBoxと基礎理論}{11}{}%
+\contentsline {chapter}{\numberline {第3章}提案手法}{13}{}%
+\contentsline {section}{\numberline {3.1}システム概要}{13}{}%
+\contentsline {section}{\numberline {3.2}対話システムとアルゴリズム}{13}{}%
+\contentsline {section}{\numberline {3.3}UIの構築}{14}{}%
+\contentsline {chapter}{\numberline {第4章}実験}{18}{}%
+\contentsline {section}{\numberline {4.1}RenderBoxの訓練}{18}{}%
+\contentsline {subsection}{\numberline {4.1.1}データセット}{18}{}%
+\contentsline {subsection}{\numberline {4.1.2}カリキュラム学習}{18}{}%
+\contentsline {subsection}{\numberline {4.1.3}性能評価指標}{19}{}%
+\contentsline {section}{\numberline {4.2}被験者実験}{20}{}%
+\contentsline {subsection}{\numberline {4.2.1}被験者実験の概要}{20}{}%
+\contentsline {subsection}{\numberline {4.2.2}被験者実験の手順}{20}{}%
+\contentsline {subsection}{\numberline {4.2.3}評価指標}{22}{}%
+\contentsline {chapter}{\numberline {第5章}結果}{24}{}%
+\contentsline {section}{\numberline {5.1}RenderBoxの評価}{24}{}%
+\contentsline {section}{\numberline {5.2}提案システムの評価}{26}{}%
+\contentsline {subsection}{\numberline {5.2.1}客観評価}{26}{}%
+\contentsline {subsection}{\numberline {5.2.2}主観評価}{26}{}%
+\contentsline {chapter}{\numberline {第6章}考察}{27}{}%
+\contentsline {section}{\numberline {6.1}RenderBoxの性能について}{27}{}%
+\contentsline {section}{\numberline {6.2}提案手法について}{27}{}%
+\contentsline {chapter}{\numberline {第7章}結論}{28}{}%
+\contentsline {chapter}{謝辞}{29}{}%
+\contentsline {chapter}{参考文献}{30}{}%
+\contentsline {chapter}{付録}{30}{}%
