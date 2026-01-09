@@ -5,7 +5,6 @@ Generates a GIF demonstrating the 'always frontal' view logic.
 """
 
 import argparse
-import json
 import os
 import sys
 
@@ -102,97 +101,8 @@ import cli_args
 parser = argparse.ArgumentParser(description="Visualize H1 2D projection.")
 parser.add_argument("--task", type=str, default="h1_base_rough", help="Gym task id.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of envs.")
-parser.add_argument(
-    "--usd_path",
-    type=str,
-    default=None,
-    help="Override robot USD path (e.g., /workspace/NaVILA-Bench/h1_hand_head.usd for explicit markers).",
-)
-parser.add_argument("--frames", type=int, default=100, help="Number of frames to record (default: 100 = 2sec @ 50Hz).")
+parser.add_argument("--frames", type=int, default=500, help="Number of frames to record.")
 parser.add_argument("--save_path", type=str, default="h1_stick_figure.gif", help="Output GIF path.")
-parser.add_argument("--gif_fps", type=int, default=50, help="GIF/MP4 playback FPS (default: 50 to match Isaac Sim control rate).")
-parser.add_argument("--disable_gravity", action="store_true", help="Disable gravity to keep robot upright.")
-parser.add_argument("--use_markers", action="store_true", help="Use marker prims (head/neck/hand) if present.")
-parser.add_argument(
-    "--no_marker_override",
-    action="store_true",
-    help="Disable marker-based buffer override (still allows offset dumping).",
-)
-parser.add_argument("--no_policy", action="store_true", help="Skip loading policy and use zero actions.")
-parser.add_argument(
-    "--disable_sensors",
-    action="store_true",
-    help="Disable contact/height sensors and dependent terms (useful if custom USD breaks sensor paths).",
-)
-parser.add_argument(
-    "--no_env_render",
-    action="store_true",
-    help="Skip env.render() frames (stick-figure GIF only). Use if headless without --enable_cameras.",
-)
-parser.add_argument(
-    "--log_root",
-    type=str,
-    default=None,
-    help="Override log root directory containing rsl_rl runs (e.g., /workspace/NaVILA-Bench/legged-loco/logs/rsl_rl).",
-)
-parser.add_argument(
-    "--use_log_env",
-    action="store_true",
-    default=True,
-    help="Apply env.yaml from the run to match observation sizes.",
-)
-parser.add_argument(
-    "--use_base_policy",
-    action="store_true",
-    default=False,
-    help="Load base policy for residual actor (default: off, matches eval_style_per_onomatopoeia).",
-)
-# Stick-figure preprocessing controls
-parser.add_argument(
-    "--coord_mode",
-    type=str,
-    default="hoyo_front",
-    choices=["hoyo_front", "legacy_xz_yaw"],
-    help="Coordinate preprocessing mode for keymap generation.",
-)
-parser.add_argument(
-    "--standardize",
-    action="store_true",
-    help="Apply mean/std normalization to keymap (default: off for visualization).",
-)
-parser.add_argument(
-    "--no_normalize_height",
-    action="store_true",
-    help="Disable height normalization (default: on).",
-)
-parser.add_argument(
-    "--head_ratio",
-    type=float,
-    default=None,
-    help="Override head/shoulder ratio used for head estimation (HOYO_HEAD_SHOULDER_RATIO).",
-)
-parser.add_argument(
-    "--neck_ratio",
-    type=float,
-    default=None,
-    help="Override neck/shoulder ratio used for neck estimation (HOYO_NECK_SHOULDER_RATIO).",
-)
-parser.add_argument(
-    "--dump_offsets",
-    action="store_true",
-    help="Print parent-local offsets from marker prims.",
-)
-parser.add_argument(
-    "--dump_offsets_path",
-    type=str,
-    default=None,
-    help="Write offsets JSON to path (e.g., configs/h1_to_hoyo_offsets.json).",
-)
-parser.add_argument(
-    "--dump_offsets_only",
-    action="store_true",
-    help="Exit after dumping offsets (no rollout/animation).",
-)
 # Missing args required by parse_rsl_rl_cfg
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--use_cnn", action="store_true", default=None, help="Use CNN")
@@ -212,7 +122,7 @@ import gymnasium as gym
 import torch
 import isaaclab_tasks
 import omni.isaac.leggedloco.config
-from isaaclab_tasks.utils import parse_env_cfg, get_checkpoint_path
+from isaaclab_tasks.utils import parse_env_cfg
 from isaaclab.utils.io import load_yaml
 import yaml
 from isaaclab.utils import update_class_from_dict
@@ -348,140 +258,6 @@ SKELETON_EDGES = [
     (12, 13), # L-Knee - L-Ankle
 ]
 
-
-def _resolve_marker_prims(stage, marker_names: set[str], env_hint: str = "/World/envs/env_0") -> dict:
-    """Find marker prims by exact name, prefer env_0 if present."""
-    from pxr import Usd
-
-    found = {}
-    for prim in Usd.PrimRange(stage.GetPseudoRoot()):
-        name = prim.GetName()
-        if name in marker_names:
-            path = str(prim.GetPath())
-            if env_hint in path:
-                found[name] = prim
-            elif name not in found:
-                found[name] = prim
-    return found
-
-
-def _pick_marker_prims(stage) -> dict:
-    """Pick best marker prims for HOYO endpoints if available."""
-    marker_candidates = {
-        "head": ["head", "head_marker", "head_tip"],
-        "neck": ["neck", "neck_marker", "neck_tip"],
-        "r_hand": ["right_hand_marker", "right_hand_tip", "right_hand"],
-        "l_hand": ["left_hand_marker", "left_hand_tip", "left_hand"],
-    }
-    all_names = {name for names in marker_candidates.values() for name in names}
-    prims = _resolve_marker_prims(stage, all_names)
-    picked = {}
-    for role, names in marker_candidates.items():
-        for name in names:
-            if name in prims:
-                picked[role] = prims[name]
-                break
-    return picked
-
-
-def _apply_marker_overrides(style_module, marker_prims, xform_cache) -> None:
-    """Override latest motion buffer frame with marker prim positions."""
-    if style_module is None or not marker_prims:
-        return
-    # HOYO indices: head=0, neck=1, r_hand=4, l_hand=7
-    index_map = {0: "head", 1: "neck", 4: "r_hand", 7: "l_hand"}
-    xform_cache.Clear()
-    for idx, role in index_map.items():
-        prim = marker_prims.get(role)
-        if prim is None:
-            continue
-        mat = xform_cache.GetLocalToWorldTransform(prim)
-        pos = mat.ExtractTranslation()
-        style_module.motion_buffer[:, -1, idx, :] = torch.tensor(
-            [pos[0], pos[1], pos[2]], device=style_module.motion_buffer.device
-        )
-
-
-def _find_parent_by_name(prim, name_candidates):
-    """Walk up the prim hierarchy to find a parent whose name matches candidates."""
-    current = prim.GetParent()
-    while current and current.IsValid():
-        name = current.GetName()
-        for cand in name_candidates:
-            if cand in name:
-                return current
-        current = current.GetParent()
-    return prim.GetParent()
-
-
-def _extract_local_offset(parent_prim, child_prim, xform_cache):
-    """Compute child translation in parent local frame."""
-    xform_cache.Clear()
-    parent_w = xform_cache.GetLocalToWorldTransform(parent_prim)
-    child_w = xform_cache.GetLocalToWorldTransform(child_prim)
-    local = parent_w.GetInverse() * child_w
-    t = local.ExtractTranslation()
-    return [float(t[0]), float(t[1]), float(t[2])]
-
-
-def _compute_offsets_from_markers(marker_prims, xform_cache):
-    """Compute HOYO offsets from marker prims and their intended parents."""
-    offsets = {}
-    parents = {}
-    # head/neck -> torso_link
-    if "head" in marker_prims:
-        head_parent = _find_parent_by_name(marker_prims["head"], ["torso_link", "torso"])
-        offsets["head"] = _extract_local_offset(head_parent, marker_prims["head"], xform_cache)
-        parents["head"] = str(head_parent.GetPath())
-    if "neck" in marker_prims:
-        neck_parent = _find_parent_by_name(marker_prims["neck"], ["torso_link", "torso"])
-        offsets["neck"] = _extract_local_offset(neck_parent, marker_prims["neck"], xform_cache)
-        parents["neck"] = str(neck_parent.GetPath())
-    # hands -> elbow links
-    if "r_hand" in marker_prims:
-        r_parent = _find_parent_by_name(marker_prims["r_hand"], ["right_elbow_link", "right_elbow"])
-        offsets["r_hand"] = _extract_local_offset(r_parent, marker_prims["r_hand"], xform_cache)
-        parents["r_hand"] = str(r_parent.GetPath())
-    if "l_hand" in marker_prims:
-        l_parent = _find_parent_by_name(marker_prims["l_hand"], ["left_elbow_link", "left_elbow"])
-        offsets["l_hand"] = _extract_local_offset(l_parent, marker_prims["l_hand"], xform_cache)
-        parents["l_hand"] = str(l_parent.GetPath())
-    return offsets, parents
-
-
-def _write_offsets_json(path, offsets):
-    data = {}
-    if path and os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-    data.update(offsets)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=True)
-
-
-def _strip_terms_with_entity(cfg_section, entity_name: str) -> None:
-    """Disable terms in a manager cfg section that reference a given SceneEntityCfg name."""
-    try:
-        from isaaclab.managers import SceneEntityCfg
-    except Exception:
-        SceneEntityCfg = None
-    if cfg_section is None:
-        return
-    for term_name, term_cfg in cfg_section.__dict__.items():
-        if term_cfg is None:
-            continue
-        params = getattr(term_cfg, "params", None)
-        if not isinstance(params, dict):
-            continue
-        for _, value in params.items():
-            if SceneEntityCfg is not None and isinstance(value, SceneEntityCfg):
-                if value.name == entity_name:
-                    setattr(cfg_section, term_name, None)
-                    break
-
 # Better connectivity for visual appeal (Torso/Spine logic might differ, but this is simple stickman)
 # Note: HOYO uses:
 # Head, Neck
@@ -497,8 +273,9 @@ import imageio
 
 
 def main():
-    # Resolve run directory (align with eval_style_per_onomatopoeia defaults)
-    default_run = "2026-01-05_03-51-55_trial_h1_vision_20260104_hoyo_m2t_repro"
+    # Hardcoded base run for debugging
+    # base_run_dir = os.path.join(REPO_ROOT, "logs", "rsl_rl", "h1_base_rough", "2025-12-06_10-01-18")
+    base_run_dir = os.path.join(REPO_ROOT, "logs", "rsl_rl", "h1_vision_rough", "2026-01-05_03-51-55_trial_h1_vision_20260104_hoyo_m2t_repro")
     
     # Switch default task if not provided (though args are parsed already, we override if it matches default)
     if args_cli.task == "h1_base_rough": # or check if user didn't provide it? simpler to just use args_cli.task if user provided it
@@ -511,24 +288,14 @@ def main():
         # We will warn if mismatch.
         pass
 
-    # Normalize task name (gym registry uses h1_vision)
-    if args_cli.task == "h1_vision_rough":
-        print("[WARN] Task 'h1_vision_rough' not registered. Using 'h1_vision' instead.")
-        args_cli.task = "h1_vision"
-
     # Parse config
     env_cfg = parse_env_cfg(args_cli.task, num_envs=args_cli.num_envs)
     agent_cfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
-    load_run = args_cli.load_run or default_run
-    log_root_base = args_cli.log_root or os.path.join(REPO_ROOT, "logs", "rsl_rl")
-    log_root_path = os.path.join(log_root_base, agent_cfg.experiment_name)
-    log_dir = os.path.join(log_root_path, load_run)
-    print(f"[INFO] Loading run from directory: {log_dir}")
 
     # Load params from run
     # Load params from run
-    log_env_cfg_path = os.path.join(log_dir, "params", "env.yaml")
-    if args_cli.use_log_env and os.path.exists(log_env_cfg_path):
+    log_env_cfg_path = os.path.join(base_run_dir, "params", "env.yaml")
+    if os.path.exists(log_env_cfg_path):
         print(f"Loading env config from {log_env_cfg_path}")
         try:
             try:
@@ -554,18 +321,10 @@ def main():
             print(f"[WARN] Failed to apply env.yaml overrides: {exc}")
         
     enforce_num_envs(env_cfg, args_cli.num_envs)
-    if args_cli.usd_path:
-        try:
-            env_cfg.scene.robot.spawn.usd_path = args_cli.usd_path
-            if args_cli.disable_gravity:
-                env_cfg.scene.robot.spawn.rigid_props.disable_gravity = True
-            print(f"[INFO] Using custom USD: {args_cli.usd_path}")
-        except Exception as exc:
-            print(f"[WARN] Failed to apply USD override: {exc}")
 
     # Update agent config from the loaded run
     log_agent_cfg_dict = None
-    log_agent_cfg_file_path = os.path.join(log_dir, "params", "agent.yaml")
+    log_agent_cfg_file_path = os.path.join(base_run_dir, "params", "agent.yaml")
     if os.path.exists(log_agent_cfg_file_path):
          log_agent_cfg_dict = load_yaml(log_agent_cfg_file_path)
          update_class_from_dict(agent_cfg, log_agent_cfg_dict)
@@ -582,18 +341,8 @@ def main():
         if history_length:
             print(f"[INFO] Using history_length={history_length} from agent config.")
 
-    # Respect checkpoint override from CLI (if any)
-    if args_cli.checkpoint is not None:
-         agent_cfg.load_checkpoint = args_cli.checkpoint
-
-    # Disable base policy unless explicitly requested (matches eval script)
-    if not args_cli.use_base_policy:
-         if hasattr(agent_cfg, "policy") and hasattr(agent_cfg.policy, "base_policy_checkpoint"):
-             agent_cfg.policy.base_policy_checkpoint = None
-             print("[INFO] Base policy loading disabled.")
-
     # Infer obs dims from checkpoint and adjust config if needed
-    resume_path = get_checkpoint_path(log_root_path, load_run, agent_cfg.load_checkpoint)
+    resume_path = os.path.join(base_run_dir, "model_1800.pt")
     actor_in, critic_in = infer_obs_dims_from_checkpoint(resume_path)
     print(f"[INFO] Checkpoint obs dims: actor_in={actor_in}, critic_in={critic_in}")
     maybe_disable_critic_style(env_cfg, actor_in, critic_in)
@@ -624,59 +373,8 @@ def main():
             },
         )
 
-    # Disable sensors/terms when using custom USD (they require specific prim paths that may differ)
-    if args_cli.disable_sensors:
-        print("[INFO] Disabling contact/height sensors and dependent terms")
-        if hasattr(env_cfg, "scene"):
-            if hasattr(env_cfg.scene, "contact_forces"):
-                env_cfg.scene.contact_forces = None
-            if hasattr(env_cfg.scene, "height_scan"):
-                env_cfg.scene.height_scan = None
-            if hasattr(env_cfg.scene, "height_scanner"):
-                env_cfg.scene.height_scanner = None
-        # Also disable observations that depend on these sensors
-        if hasattr(env_cfg, "observations"):
-            if hasattr(env_cfg.observations, "policy"):
-                for key in ("height_scan", "height_scanner"):
-                    if hasattr(env_cfg.observations.policy, key):
-                        setattr(env_cfg.observations.policy, key, None)
-            if hasattr(env_cfg.observations, "critic"):
-                for key in ("height_scan", "height_scanner"):
-                    if hasattr(env_cfg.observations.critic, key):
-                        setattr(env_cfg.observations.critic, key, None)
-        # Disable rewards/terminations that reference contact_forces
-        if hasattr(env_cfg, "rewards"):
-            _strip_terms_with_entity(env_cfg.rewards, "contact_forces")
-            if hasattr(env_cfg.rewards, "feet_stumble"):
-                env_cfg.rewards.feet_stumble = None
-        if hasattr(env_cfg, "terminations"):
-            _strip_terms_with_entity(env_cfg.terminations, "contact_forces")
-            if hasattr(env_cfg.terminations, "base_contact"):
-                env_cfg.terminations.base_contact = None
-
     # Enable rendering
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-
-    marker_prims = {}
-    xform_cache = None
-    use_markers = bool(args_cli.use_markers or args_cli.usd_path)
-    if use_markers:
-        try:
-            import omni.usd
-            from pxr import UsdGeom
-
-            stage = omni.usd.get_context().get_stage()
-            marker_prims = _pick_marker_prims(stage)
-            if marker_prims:
-                print("[INFO] Found marker prims:")
-                for role, prim in marker_prims.items():
-                    print(f"  {role}: {prim.GetPath()}")
-            else:
-                print("[INFO] No marker prims found (head/neck/hand).")
-            xform_cache = UsdGeom.XformCache()
-        except Exception as exc:
-            print(f"[WARN] Failed to resolve marker prims: {exc}")
-    marker_override_enabled = bool(marker_prims and xform_cache and not args_cli.no_marker_override)
     
     # Wrap environment for RSL-RL (history-aware if needed)
     if history_length > 0:
@@ -685,19 +383,14 @@ def main():
     else:
         env = RslRlVecEnvWrapper(env)
 
-    # Load Policy (optional)
-    policy = None
-    if not args_cli.no_policy:
-        print(f"Loading policy from {log_dir}")
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-        # Resolve checkpoint path from run folder
-        resume_path = get_checkpoint_path(log_root_path, load_run, agent_cfg.load_checkpoint)
-        try:
-            runner.load(resume_path)
-            policy = runner.get_inference_policy(device=env.unwrapped.device)
-        except Exception as exc:
-            print(f"[WARN] Failed to load policy: {exc}")
-            print("[WARN] Falling back to zero actions. Use --no_policy to silence this.")
+    # Load Policy
+    print(f"Loading policy from {base_run_dir}")
+    # We need to construct runner to load
+    runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    # Load model_9.pt (latest in that dir)
+    resume_path = os.path.join(base_run_dir, "model_1800.pt")
+    runner.load(resume_path)
+    policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     env.reset()
     
@@ -719,49 +412,9 @@ def main():
     else:
         print("Warning: 'style_command' not found. Visualization of stick figure might fail or be empty.")
         style_module = None
-    if style_module is not None:
-        # Force desired preprocessing mode for debugging visualization
-        if getattr(style_module, "coord_mode", None) != args_cli.coord_mode:
-            print(f"[INFO] Overriding coord_mode: {getattr(style_module, 'coord_mode', None)} -> {args_cli.coord_mode}")
-        style_module.coord_mode = args_cli.coord_mode
-        if args_cli.head_ratio is not None:
-            style_module.head_shoulder_ratio = float(args_cli.head_ratio)
-        if args_cli.neck_ratio is not None:
-            style_module.neck_shoulder_ratio = float(args_cli.neck_ratio)
-        print(
-            f"[INFO] Keymap preprocess: coord_mode={style_module.coord_mode}, "
-            f"standardize={args_cli.standardize}, "
-            f"normalize_height={not args_cli.no_normalize_height}"
-        )
-        if args_cli.head_ratio is not None or args_cli.neck_ratio is not None:
-            print(
-                f"[INFO] Head/Neck ratios: head={style_module.head_shoulder_ratio}, "
-                f"neck={style_module.neck_shoulder_ratio}"
-            )
 
-    # Dump offsets from marker prims if requested.
-    if marker_prims and xform_cache and (args_cli.dump_offsets or args_cli.dump_offsets_path):
-        offsets, parents = _compute_offsets_from_markers(marker_prims, xform_cache)
-        if offsets:
-            print("[INFO] Marker parent paths:")
-            for key, path in parents.items():
-                print(f"  {key}: {path}")
-            print("[INFO] Computed offsets (parent-local):")
-            for key, vec in offsets.items():
-                print(f"  {key}: {vec}")
-            if args_cli.dump_offsets_path:
-                _write_offsets_json(args_cli.dump_offsets_path, offsets)
-                print(f"[INFO] Wrote offsets to: {args_cli.dump_offsets_path}")
-        else:
-            print("[WARN] No offsets computed (missing marker prims).")
-        if args_cli.dump_offsets_only:
-            env.close()
-            simulation_app.close()
-            return
-
-    history_2d = []
+    history_2d = [] 
     video_frames = []
-    env_render_enabled = not args_cli.no_env_render
     
     init_root_pos = robot.data.root_pos_w[0].clone()
     init_root_pos[2] += 0.1 
@@ -788,14 +441,10 @@ def main():
         if base_vel_term:
              _set_base_velocity_for_envs(base_vel_term, range(env.unwrapped.num_envs), cmd)
         
-        # Inference or zero actions
+        # Inference
         with torch.no_grad():
              obs, _ = env.get_observations()
-             if policy is None:
-                 act_dim = env.action_space.shape[0]
-                 actions = torch.zeros((env.unwrapped.num_envs, act_dim), device=env.unwrapped.device)
-             else:
-                 actions = policy(obs)
+             actions = policy(obs)
              step_out = env.step(actions)
              if len(step_out) == 5:
                  obs, rew, terminated, truncated, info = step_out
@@ -816,15 +465,10 @@ def main():
             print("yaw(rad)=", yaw)
         
         # --- Capture Video Frame ---
-        if i >= warmup_steps and env_render_enabled:
-             try:
-                  frame = env.unwrapped.render()
-                  if frame is not None:
-                       video_frames.append(frame)
-             except RuntimeError as exc:
-                  print(f"[WARN] env.render() disabled: {exc}")
-                  print("[WARN] Re-run with --enable_cameras or pass --no_env_render to skip.")
-                  env_render_enabled = False
+        if i >= warmup_steps:
+             frame = env.unwrapped.render()
+             if frame is not None:
+                  video_frames.append(frame)
              
              # Update Camera to look at robot
              # logic from play.py
@@ -844,27 +488,12 @@ def main():
              body_names = robot.data.body_names 
              
              style_module.update_buffer(body_pos_w, root_quat_w, body_names, body_quat_w)
-             if marker_override_enabled:
-                 _apply_marker_overrides(style_module, marker_prims, xform_cache)
              
              # Capture 2D map
              if i >= warmup_steps:
-                 full_buffer_2d = style_module.get_hoyo_compatible_keymap(
-                     standardize=args_cli.standardize,
-                     normalize_height=not args_cli.no_normalize_height,
-                 )
+                 full_buffer_2d = style_module.get_hoyo_compatible_keymap(standardize=False, normalize_height=False)
                  latest_frame_2d = full_buffer_2d[0, -1].detach().cpu().numpy() # (14, 2)
                  history_2d.append(latest_frame_2d)
-                 
-                 # Debug: print coordinates every 100 frames
-                 if (i - warmup_steps) % 100 == 0:
-                     print(f"[Frame {i - warmup_steps}] 2D coords (x=lateral, y=down):")
-                     print(f"  Head(0): {latest_frame_2d[0]}")
-                     print(f"  Neck(1): {latest_frame_2d[1]}")
-                     print(f"  R-Shoulder(2): {latest_frame_2d[2]}")
-                     print(f"  L-Shoulder(5): {latest_frame_2d[5]}")
-                     print(f"  R-Hip(8): {latest_frame_2d[8]}")
-                     print(f"  R-Ankle(10): {latest_frame_2d[10]}")
 
         # Handle resets
         # If any env is done, we reset everything for simplicity in this single-stream debug
@@ -884,43 +513,29 @@ def main():
     
     print(f"Generating animation: {args_cli.save_path}")
     
-    # Save MP4 (only if we captured env frames)
-    if video_frames:
-        mp4_path = args_cli.save_path.replace(".gif", ".mp4")
-        print(f"Saving MP4 video to {mp4_path}...")
-        try:
-            mp4_out = os.path.abspath(mp4_path)
-            writer = imageio.get_writer(mp4_out, fps=args_cli.gif_fps)
-            for frame in video_frames:
-                writer.append_data(frame)
-            writer.close()
-            print(f"Saved Video: {mp4_out}")
-        except Exception as e:
-            print(f"Error saving MP4: {e}")
-            import traceback
-            traceback.print_exc()
-    else:
-        print("[INFO] No env frames captured. Skipping MP4 export.")
+    # Save MP4
+    mp4_path = args_cli.save_path.replace(".gif", ".mp4")
+    print(f"Saving MP4 video to {mp4_path}...")
+    try:
+        mp4_out = os.path.abspath(mp4_path)
+        writer = imageio.get_writer(mp4_out, fps=30)
+        for frame in video_frames:
+            writer.append_data(frame)
+        writer.close()
+        print(f"Saved Video: {mp4_out}")
+    except Exception as e:
+        print(f"Error saving MP4: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Plotting
     fig, ax = plt.subplots(figsize=(6, 6))
-
-    # Auto-scale axes from collected keypoints so the full body is visible.
-    if len(history_2d) > 0:
-        all_data = np.stack(history_2d, axis=0)  # (T, 14, 2)
-        x_all = all_data[..., 0]
-        y_all = -all_data[..., 1]  # flip for display (up positive)
-        x_min, x_max = float(np.min(x_all)), float(np.max(x_all))
-        y_min, y_max = float(np.min(y_all)), float(np.max(y_all))
-        # Add padding to avoid clipping at edges
-        pad_x = max(0.05, 0.1 * (x_max - x_min))
-        pad_y = max(0.05, 0.1 * (y_max - y_min))
-        ax.set_xlim(x_min - pad_x, x_max + pad_x)
-        ax.set_ylim(y_min - pad_y, y_max + pad_y)
-    else:
-        # Fallback: reasonable defaults for meter-scale visualization
-        ax.set_xlim(-1.0, 1.0)
-        ax.set_ylim(-0.5, 2.0)
+    
+    # Raw meter scale: Robot is ~1.7m tall.
+    # X: Left/Right (-1 to 1)
+    # Y: Up/Down (-0.5 to 2.0)
+    ax.set_xlim(-1.0, 1.0) 
+    ax.set_ylim(-0.5, 2.0)
     
     # Plot y = -y to flip "Down is Positive" (HOYO) to "Up is Positive" (Plot)
     
@@ -946,7 +561,7 @@ def main():
         print("Saving GIF... (this might take a moment)")
         out_path = os.path.abspath(args_cli.save_path)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        ani.save(out_path, writer=PillowWriter(fps=args_cli.gif_fps))
+        ani.save(out_path, writer=PillowWriter(fps=30))
         print("Saved:", out_path)
     except Exception as e:
         print(f"Error saving animation: {e}")

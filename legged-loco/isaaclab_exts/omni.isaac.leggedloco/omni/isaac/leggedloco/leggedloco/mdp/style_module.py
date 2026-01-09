@@ -49,12 +49,13 @@ class StyleModule:
         run_name: str = "sarashina_full_fixed",
         num_envs: int = 1,
         coord_mode: str = "legacy_xz_yaw",
+        buffer_len: int = 100,  # 2秒 × 50Hz
     ):
         self.device = torch.device(device)
         self.run_name = run_name
         self.root_dir = NAVILA_ROOT / "hoyo_v1_1" / "joint_training_results" / run_name
         self.num_envs = num_envs
-        self.buffer_len = 60
+        self.buffer_len = buffer_len
         self.coord_mode = coord_mode
         if self.coord_mode not in ("legacy_xz_yaw", "hoyo_front"):
             raise ValueError(f"Unsupported coord_mode: {self.coord_mode}")
@@ -62,7 +63,7 @@ class StyleModule:
         # Head/neck estimation ratios from HOYO stats (hs/hf, ns/hf).
         # Allow override via env vars if needed.
         self.head_shoulder_ratio = float(os.environ.get("HOYO_HEAD_SHOULDER_RATIO", "0.2375"))
-        self.neck_shoulder_ratio = float(os.environ.get("HOYO_NECK_SHOULDER_RATIO", "0.0639"))
+        self.neck_shoulder_ratio = float(os.environ.get("HOYO_NECK_SHOULDER_RATIO", "0.15"))
 
         # Text embedding device (default CPU to avoid GPU OOM when running RL)
         self.text_device = torch.device(os.environ.get("STYLE_TEXT_DEVICE", "cpu"))
@@ -90,10 +91,21 @@ class StyleModule:
         else:
             with open(self.mapping_path, "r") as f:
                 self.mapping_dict = json.load(f)
+
+        # Optional offsets override (meters in parent link local frame)
+        self.offsets_override = None
+        offsets_path = NAVILA_ROOT / "configs" / "h1_to_hoyo_offsets.json"
+        if offsets_path.exists():
+            try:
+                with open(offsets_path, "r") as f:
+                    self.offsets_override = json.load(f)
+            except Exception as exc:
+                print(f"Warning: Failed to load offsets file: {offsets_path}: {exc}")
+                self.offsets_override = None
         
         # Track warmup state per environment
         self.warmup_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
-        self.warmup_frames = 60  # Need at least 60 frames before valid reward
+        self.warmup_frames = self.buffer_len  # Need full buffer before valid reward
         
         # Fixed scale reference per environment (nan = uninitialized)
         self.scale_ref = torch.full((self.num_envs,), float("nan"), device=self.device)
@@ -123,7 +135,7 @@ class StyleModule:
 
     def _load_models(self):
         # ... (Same as before)
-        self.motion_model, self.model_params = load_motionclip_full_model(self.device, target_len=60)
+        self.motion_model, self.model_params = load_motionclip_full_model(self.device, target_len=self.buffer_len)
         self.motion_model.eval()
         for p in self.motion_model.parameters():
             p.requires_grad = False
@@ -370,6 +382,32 @@ class StyleModule:
             print(f"[StyleModule] Final body indices: {self.body_indices.tolist()}")
             print(f"[StyleModule] Offsets applied for: {[hoyo_order[i] for i in range(14) if self.body_offsets[i].abs().sum() > 0]}")
 
+            # Apply override offsets (if provided) when joint is missing or mapped to a parent link
+            if self.offsets_override:
+                applied = []
+                for key, vec in self.offsets_override.items():
+                    if key not in map_dict:
+                        continue
+                    try:
+                        idx = hoyo_order.index(key)
+                    except ValueError:
+                        continue
+                    target_name = str(map_dict.get(key, ""))
+                    should_apply = (
+                        key in self._missing_joints
+                        or "elbow" in target_name
+                        or "torso" in target_name
+                        or "pelvis" in target_name
+                    )
+                    if not should_apply:
+                        continue
+                    if not (isinstance(vec, (list, tuple)) and len(vec) == 3):
+                        continue
+                    self.body_offsets[idx] = torch.tensor(vec, device=self.device, dtype=torch.float32)
+                    applied.append(key)
+                if applied:
+                    print(f"[StyleModule] Offset overrides applied for: {applied}")
+
         # Gather joints
         # (B, NumBodies, 3) -> (B, 14, 3)
         hoyo_3d = body_pos_w[:, self.body_indices, :]
@@ -408,17 +446,16 @@ class StyleModule:
                 r_ank = hoyo_3d[:, 10, :]
                 l_ank = hoyo_3d[:, 13, :]
                 feet_mid = 0.5 * (r_ank + l_ank)
-                d = shoulder_mid[:, 2] - feet_mid[:, 2]
+                up_vec = shoulder_mid - feet_mid
+                d = torch.norm(up_vec, dim=-1)
                 d = torch.clamp(d, min=1e-6)
+                up_dir = up_vec / d.unsqueeze(-1)
                 h_off = (self.head_shoulder_ratio / (1.0 - self.head_shoulder_ratio)) * d
                 n_off = (self.neck_shoulder_ratio / (1.0 - self.neck_shoulder_ratio)) * d
 
-                # Head
-                hoyo_3d[:, 0, 0:2] = shoulder_mid[:, 0:2]
-                hoyo_3d[:, 0, 2] = shoulder_mid[:, 2] + h_off
-                # Neck
-                hoyo_3d[:, 1, 0:2] = shoulder_mid[:, 0:2]
-                hoyo_3d[:, 1, 2] = shoulder_mid[:, 2] + n_off
+                # Head / Neck along body-up direction (not fixed world-Z)
+                hoyo_3d[:, 0, :] = shoulder_mid + up_dir * h_off.unsqueeze(-1)
+                hoyo_3d[:, 1, :] = shoulder_mid + up_dir * n_off.unsqueeze(-1)
 
         return hoyo_3d # (B, 14, 3)
 
@@ -509,7 +546,16 @@ class StyleModule:
             l_ankle = self.motion_buffer[:, :, 13, :]
             feet_mid = 0.5 * (r_ankle + l_ankle)
             heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
-            scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
+            # Use only valid frames to avoid scale drift from zero-initialized buffer.
+            if hasattr(self, "warmup_counter"):
+                T = heights.shape[1]
+                valid_len = torch.clamp(self.warmup_counter, min=1, max=T).view(-1, 1)
+                t_idx = torch.arange(T, device=heights.device).view(1, T)
+                mask = (t_idx >= (T - valid_len)).float()
+                scale = (heights * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+                scale = scale.view(-1, 1)
+            else:
+                scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
             scale = torch.maximum(scale, torch.tensor(1.0, device=self.device))
             scale_bc = scale.view(-1, 1, 1, 1)
             centered = centered / scale_bc
@@ -571,22 +617,31 @@ class StyleModule:
             l_ankle = centered[:, :, 13, :]   # (B, T, 2) - left ankle
             feet_mid = 0.5 * (r_ankle + l_ankle)
 
-            # Current height per env (mean over time)
+            # Current height per env (mean over valid frames)
             heights = torch.norm(head_pos - feet_mid, dim=-1)  # (B, T)
-            curr_scale = heights.mean(dim=1)  # (B,)
+            if hasattr(self, "warmup_counter"):
+                T = heights.shape[1]
+                valid_len = torch.clamp(self.warmup_counter, min=1, max=T).view(-1, 1)
+                t_idx = torch.arange(T, device=heights.device).view(1, T)
+                mask = (t_idx >= (T - valid_len)).float()
+                curr_scale = (heights * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            else:
+                curr_scale = heights.mean(dim=1)  # (B,)
             curr_scale = curr_scale.clamp(self.scale_min, self.scale_max)
 
             # Identify envs needing init vs update
             need_init = torch.isnan(self.scale_ref)
             # Healthy = standing (head-feet dist > threshold)
             healthy = (curr_scale > self.scale_healthy_threshold)
+            # Only update scale_ref after buffer is fully populated
+            full_buf = (self.warmup_counter >= self.warmup_frames)
 
             # Initialize: only healthy envs
-            init_mask = need_init & healthy
+            init_mask = need_init & healthy & full_buf
             self.scale_ref[init_mask] = curr_scale[init_mask]
 
             # EMA update: initialized & healthy envs only
-            upd_mask = (~need_init) & healthy
+            upd_mask = (~need_init) & healthy & full_buf
             self.scale_ref[upd_mask] = (
                 self.scale_ema * self.scale_ref[upd_mask]
                 + (1.0 - self.scale_ema) * curr_scale[upd_mask]

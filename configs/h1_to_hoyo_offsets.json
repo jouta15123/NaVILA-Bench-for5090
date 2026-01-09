@@ -1,0 +1,7 @@
+{
+  "_comment": "Offsets in meters in the parent link local frame. Only used when the joint is missing or mapped to a parent (torso/elbow).",
+  "head": [0.0, 0.0, 0.71],
+  "neck": [0.0, 0.0, 0.52],
+  "r_hand": [0.30523, 0, 0],
+  "l_hand": [0.30523, 0, 0]
+}

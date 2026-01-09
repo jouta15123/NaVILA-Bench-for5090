@@ -120,7 +120,7 @@ COARSE_GROUPS = {
 }
 COARSE_LABELS = list(COARSE_GROUPS.keys())
 
-def load_motionclip_full_model(device: torch.device, target_len: int = 60):
+def load_motionclip_full_model(device: torch.device, target_len: int = 100):
     """
     Loads the full MotionCLIP model (encoder + decoder).
     Re-initializes input/output layers for HOYO dimensions (14 joints, 2 coords).
@@ -1260,6 +1260,18 @@ def parse_args():
         default="acc@1",
         help="Metric used to select the best checkpoint.",
     )
+    parser.add_argument(
+        "--target-len",
+        type=int,
+        default=100,
+        help="Target sequence length in frames (default: 100 = 2sec @ 50Hz)",
+    )
+    parser.add_argument(
+        "--centering",
+        choices=["first_frame_com", "pelvis", "pelvis_mean", "first_frame_pelvis"],
+        default="first_frame_com",
+        help="Centering mode: 'first_frame_com' (default, stable), 'pelvis' (per-frame, noisy), 'pelvis_mean' (window avg), 'first_frame_pelvis'.",
+    )
     return parser.parse_args()
 
 
@@ -1302,7 +1314,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
     
-    target_len = 60
+    target_len = args.target_len
+    centering = args.centering
     
     # Load Data (fine-grained labels)
     dataset = HoyoInstructionDataset(
@@ -1312,6 +1325,7 @@ def main():
         is_train=True,
         use_aug=args.use_aug,
         view_filter=args.view_filter,
+        centering=centering,
     )
     
     # Split Data (80% Train, 20% Test)
@@ -1388,6 +1402,7 @@ def main():
             "no_silhouette": args.no_silhouette,
             "best_metric": args.best_metric,
             "target_len": target_len,
+            "centering": centering,
             "device": str(device),
         }
         wandb_run = wandb.init(

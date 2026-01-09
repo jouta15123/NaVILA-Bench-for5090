@@ -55,7 +55,9 @@ class HoyoInstructionDataset(Dataset):
     MotionCLIP 用の前処理:
       1. 身長正規化 (Scale Normalization) -> ロード時に適用
       2. Window Slicing (Crop) -> __getitem__時に適用
-      3. 重心除去 (Centering) -> __getitem__時に適用
+      3. センタリング (Centering) -> __getitem__時に適用
+         - "pelvis": Per-frame Pelvis (Hip中点) を引く（位置不変、style_module.pyと統一）
+         - "first_frame_com": 最初のフレームの重心を引く（移動情報保持）
       4. 標準化 (Standardization) -> apply_normalization_from_stats で適用
     """
 
@@ -63,11 +65,16 @@ class HoyoInstructionDataset(Dataset):
         self,
         root: Path,
         target_labels: List[str],
-        target_len: int = 60,
+        target_len: int = 100,
         is_train: bool = True,
         use_aug: bool = False,
         view_filter: str = None,
         normalize_back_to_front: bool = True,
+        centering: str = "first_frame_com",
+        min_length: int = None,
+        src_fps: int = 60,
+        tgt_fps: int = 50,
+        pelvis_ema_alpha: float = 0.9,  # EMAスムージング係数（0で無効、0.8-0.95推奨）
     ):
         self.root = root
         self.target_labels = set(target_labels)
@@ -76,6 +83,11 @@ class HoyoInstructionDataset(Dataset):
         self.use_aug = use_aug # Augmentation flag (only effective if is_train=True)
         self.view_filter = view_filter  # "front", "back", or None (all)
         self.normalize_back_to_front = normalize_back_to_front
+        self.centering = centering  # "first_frame_com" (default), "pelvis", "pelvis_mean", "first_frame_pelvis"
+        self.src_fps = src_fps  # Original FPS of HOYO data
+        self.tgt_fps = tgt_fps  # Target FPS (match Isaac Sim)
+        self.min_length = min_length if min_length is not None else target_len
+        self.pelvis_ema_alpha = pelvis_ema_alpha  # EMAでpelvisをスムージング
 
         # ラベルごとの生データリスト（長さは可変、身長正規化済み）
         self.samples_by_label: Dict[str, List[np.ndarray]] = {lab: [] for lab in target_labels}
@@ -111,6 +123,11 @@ class HoyoInstructionDataset(Dataset):
 
             # ロードして身長だけ正規化（長さはそのまま）
             coords = self._load_raw_and_scale(pkl_path)
+            
+            # 最小長でフィルタリング（短すぎるサンプルを除外）
+            if coords.shape[0] < self.min_length:
+                continue
+            
             # Back viewをfrontに正規化（常に左右反転＋関節swap）
             if self.normalize_back_to_front and data.get("view") == "back":
                 coords = self._apply_horizontal_flip(coords)
@@ -147,7 +164,7 @@ class HoyoInstructionDataset(Dataset):
 
     def _load_raw_and_scale(self, pkl_path: Path) -> np.ndarray:
         """
-        Pickleを読み込み、位置合わせと身長正規化のみを行う（リサイズはしない）。
+        Pickleを読み込み、位置合わせ、身長正規化、リサンプリングを行う。
         """
         import pickle
         with open(pkl_path, "rb") as f:
@@ -181,17 +198,55 @@ class HoyoInstructionDataset(Dataset):
         # ここでは重心除去（arr_centered）は採用せず、元のarr（移動情報あり）を使う。
         # ただし、座標値が大きくなりすぎないよう、シーケンス全体の初期位置（最初のフレームの重心）を原点にする。
         
-        # 座標系変換: HOYOは [y, x] なので、 [x, y] に直すか、そのまま扱うか。
-        # MotionCLIPは通常 [x, y, z] なので、[x, y] として扱いたいなら入れ替えが必要。
-        # 多くの2Dポーズ推定は [x, y] なので、合わせるためにここで入れ替える。
-        arr_swapped = arr[..., ::-1] # [y, x] -> [x, y]
+        # 座標系変換: HOYOは [y, x] なので、 [x, y] に直す
+        arr_swapped = arr[..., ::-1]  # [y, x] -> [x, y]
+        
+        # 座標系の確認:
+        # - HOYO画像座標: 右が＋（被写体の左手 = 視聴者から見て右側 = x > 0）
+        # - style_module: H1 Y が＋（ロボットの左方向 = 正面から見て右側）
+        # → 両者は同じ向き！反転不要
         
         # 初期位置の重心（全関節の平均）を原点にする
         initial_com = arr_swapped[0].mean(axis=0)
         arr_rooted = arr_swapped - initial_com
         
         arr_scaled = arr_rooted / scale
+        
+        # 3. リサンプリング (FPS変換: 60fps → 50Hz)
+        if self.src_fps != self.tgt_fps:
+            arr_scaled = self._resample(arr_scaled, self.src_fps, self.tgt_fps)
+        
         return arr_scaled
+    
+    def _resample(self, seq: np.ndarray, src_fps: int, tgt_fps: int) -> np.ndarray:
+        """
+        線形補間でリサンプリング（numpy only、SciPy不要）。
+        seq: (T_src, 14, 2)
+        returns: (T_tgt, 14, 2) where T_tgt ≈ T_src * tgt_fps / src_fps
+        """
+        src_len = seq.shape[0]
+        tgt_len = int(round(src_len * tgt_fps / src_fps))
+        
+        if tgt_len == src_len:
+            return seq
+        if tgt_len <= 0:
+            return seq[:1]  # Fallback: at least 1 frame
+        
+        # 実際の時間軸を使用（秒単位）
+        src_times = np.arange(src_len) / src_fps  # (T_src,)
+        tgt_times = np.arange(tgt_len) / tgt_fps  # (T_tgt,)
+        
+        # Clamp target times to source range to avoid extrapolation
+        tgt_times = np.clip(tgt_times, 0, src_times[-1])
+        
+        # numpy線形補間: np.interp は1Dなので、各次元ごとにループ
+        # seq: (T_src, 14, 2) -> resampled: (T_tgt, 14, 2)
+        resampled = np.zeros((tgt_len, 14, 2), dtype=np.float32)
+        for j in range(14):
+            for c in range(2):
+                resampled[:, j, c] = np.interp(tgt_times, src_times, seq[:, j, c])
+        
+        return resampled
 
     def _process_sample(self, raw_seq: np.ndarray) -> np.ndarray:
         """
@@ -242,11 +297,28 @@ class HoyoInstructionDataset(Dataset):
                 # (T, 14, 2) @ (2, 2) -> (T, 14, 2)
                 cropped = cropped @ rot_mat.T
 
-        # 5. 重心除去 (Local Centering)
-        # クロップされた区間の「最初のフレーム」の重心を引いて、
-        # その区間内での移動（速度・軌跡）を保存する。
-        com = cropped[0].mean(axis=0) # (2,)
-        centered = cropped - com      # (T, J, C) - (2,) -> Broadcast
+        # 5. センタリング (Centering)
+        # HOYO joint indices: R-Hip=8, L-Hip=11
+        pelvis_raw = 0.5 * (cropped[:, 8, :] + cropped[:, 11, :])  # (T, 2)
+        
+        if self.centering == "pelvis":
+            # Per-frame Pelvis を引く - 位置不変だがノイジー
+            if self.pelvis_ema_alpha > 0:
+                pelvis = self._apply_ema(pelvis_raw, self.pelvis_ema_alpha)
+            else:
+                pelvis = pelvis_raw
+            centered = cropped - pelvis[:, None, :]  # (T, 14, 2)
+        elif self.centering == "pelvis_mean":
+            # 窓内平均pelvisを引く - カクカクせず平行移動を減らす
+            pelvis_mean = pelvis_raw.mean(axis=0, keepdims=True)  # (1, 2)
+            centered = cropped - pelvis_mean  # (T, 14, 2)
+        elif self.centering == "first_frame_pelvis":
+            # 最初のフレームのpelvisを引く - first_frame_comより安定
+            centered = cropped - pelvis_raw[0:1, :]  # (T, 14, 2)
+        else:  # "first_frame_com" (default)
+            # 最初のフレームの重心を引く - 移動情報保持、ノイズ少ない
+            com = cropped[0].mean(axis=0)  # (2,)
+            centered = cropped - com  # (T, J, C) - (2,) -> Broadcast
         
         # 6. 標準化 (Standardization) - On-the-fly
         if hasattr(self, "mean") and self.mean is not None and \
@@ -254,6 +326,23 @@ class HoyoInstructionDataset(Dataset):
             centered = (centered - self.mean) / self.std
 
         return centered.astype(np.float32)
+
+    @staticmethod
+    def _apply_ema(seq: np.ndarray, alpha: float) -> np.ndarray:
+        """
+        EMA (Exponential Moving Average) でシーケンスをスムージング。
+        seq: (T, D) array
+        alpha: EMA係数 (0.8-0.95推奨、高いほど滑らか)
+        returns: (T, D) smoothed array
+        
+        pelvis_smooth[t] = alpha * pelvis_smooth[t-1] + (1-alpha) * pelvis_raw[t]
+        """
+        T = seq.shape[0]
+        smoothed = np.zeros_like(seq)
+        smoothed[0] = seq[0]
+        for t in range(1, T):
+            smoothed[t] = alpha * smoothed[t-1] + (1 - alpha) * seq[t]
+        return smoothed
 
     @staticmethod
     def _apply_horizontal_flip(coords: np.ndarray) -> np.ndarray:
@@ -270,7 +359,7 @@ class HoyoInstructionDataset(Dataset):
 
     def get_sample(self, label: str) -> np.ndarray:
         """
-        指定ラベルの中からランダムに1つ選び、60フレームをクロップして返す。
+        指定ラベルの中からランダムに1つ選び、target_lenフレームをクロップして返す。
         (後方互換性用)
         """
         samples = self.samples_by_label.get(label, [])
