@@ -150,10 +150,12 @@ class ResidualActorCritic(ActorCritic):
         style_dim=512,
         base_policy_checkpoint=None,
         residual_scale=0.1,
+        unfreeze_base_last_layer: bool = False,
         **kwargs,
     ):
         self.style_dim = style_dim
         self.residual_scale = residual_scale
+        self.unfreeze_base_last_layer = unfreeze_base_last_layer
 
         super().__init__(num_actor_obs, num_critic_obs, num_actions, **kwargs)
 
@@ -170,14 +172,34 @@ class ResidualActorCritic(ActorCritic):
                     **kwargs,
                 )
                 loaded_dict = torch.load(base_policy_checkpoint, map_location=kwargs.get("device", "cpu"))
-                if "model_state_dict" in loaded_dict:
-                    self.base_policy.load_state_dict(loaded_dict["model_state_dict"])
+                state_dict = loaded_dict.get("model_state_dict", loaded_dict)
+                # Load actor-only weights to avoid critic shape mismatches across runs.
+                actor_only = {}
+                for k, v in state_dict.items():
+                    if k.startswith("actor."):
+                        actor_only[k] = v
+                    elif k in ("std", "log_std"):
+                        actor_only[k] = v
+                load_result = self.base_policy.load_state_dict(actor_only, strict=False)
+                if load_result.missing_keys or load_result.unexpected_keys:
+                    print(
+                        "Base Policy Loaded with mismatched keys. "
+                        f"Missing: {load_result.missing_keys}, Unexpected: {load_result.unexpected_keys}"
+                    )
                 else:
-                    self.base_policy.load_state_dict(loaded_dict)
+                    print("Base Policy Loaded.")
                 self.base_policy.eval()
                 for p in self.base_policy.parameters():
                     p.requires_grad = False
-                print("Base Policy Loaded.")
+                if self.unfreeze_base_last_layer and hasattr(self.base_policy, "actor"):
+                    if isinstance(self.base_policy.actor, nn.Sequential):
+                        for i in range(len(self.base_policy.actor) - 1, -1, -1):
+                            layer = self.base_policy.actor[i]
+                            if isinstance(layer, nn.Linear):
+                                print(f"Unfreezing Base Policy Layer: actor.{i} ({layer})")
+                                for param in layer.parameters():
+                                    param.requires_grad = True
+                                break
             except Exception as e:
                 print(f"Failed to load base policy: {e}")
                 self.base_policy = None

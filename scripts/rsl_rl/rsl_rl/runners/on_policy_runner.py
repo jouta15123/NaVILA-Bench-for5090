@@ -291,7 +291,23 @@ class OnPolicyRunner:
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
-        self.alg.actor_critic.load_state_dict(loaded_dict["model_state_dict"])
+        state_dict = loaded_dict["model_state_dict"]
+        model_state = self.alg.actor_critic.state_dict()
+        missing = [k for k in model_state.keys() if k not in state_dict]
+        unexpected = [k for k in state_dict.keys() if k not in model_state]
+        if missing or unexpected:
+            only_missing_base = all(k.startswith("base_policy.") for k in missing)
+            only_unexpected_base = all(k.startswith("base_policy.") for k in unexpected)
+            if (only_missing_base and not unexpected) or (only_unexpected_base and not missing) or (only_missing_base and only_unexpected_base):
+                if missing:
+                    print(f"[INFO] Ignoring missing base_policy keys in checkpoint: {missing}")
+                if unexpected:
+                    print(f"[INFO] Ignoring unexpected base_policy keys in checkpoint: {unexpected}")
+                self.alg.actor_critic.load_state_dict(state_dict, strict=False)
+            else:
+                self.alg.actor_critic.load_state_dict(state_dict)
+        else:
+            self.alg.actor_critic.load_state_dict(state_dict)
         if self.empirical_normalization:
             self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
             self.critic_obs_normalizer.load_state_dict(loaded_dict["critic_obs_norm_state_dict"])

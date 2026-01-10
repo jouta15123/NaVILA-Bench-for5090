@@ -32,3 +32,9 @@ hoyo_v1_1/proto_training_results/
 .steering/
 
 wandb/
+
+# Overleaf (独立したgitリポジトリ)
+Sasaki_BachelorThesis_2025/
+
+# バックアップ等
+_extracted/

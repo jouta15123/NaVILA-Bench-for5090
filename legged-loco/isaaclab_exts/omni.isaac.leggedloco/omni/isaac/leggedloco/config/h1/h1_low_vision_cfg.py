@@ -386,7 +386,7 @@ class CustomH1Rewards(H1Rewards):
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=3.0,  # Increased from 1.0 to balance with velocity tracking
-        params={"command_name": "style_command", "beta_text": 0.5, "beta_centroid": 0.5, "ramp_steps": 5000},
+        params={"command_name": "style_command", "beta_text": 0.5, "beta_teacher_motion": 0.5, "ramp_steps": 5000},
     )
 ##
 # Commands
@@ -530,6 +530,11 @@ class H1VisionRoughEnvCfg_HeadingFixed(H1VisionRoughEnvCfg):
     - 初期yaw=0でスタート（ランダムではない）
     - 前進報酬（track_lin_vel_xy_exp）を有効化
     - heading報酬（track_heading_world_exp）で方向を維持
+
+    変更点 (2026-01-10):
+    - スタイル報酬を強化 (3.0 → 5.0)
+    - 速度追従を緩める (1.0 → 0.5)
+    - スタイルを邪魔するペナルティを緩める
     """
 
     def __post_init__(self):
@@ -547,12 +552,12 @@ class H1VisionRoughEnvCfg_HeadingFixed(H1VisionRoughEnvCfg):
         # 新: 常にworld X正方向を向いてスタート
         self.events.reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
 
-        # === 変更3: 前進報酬を有効化 ===
-        # 旧: track_lin_vel_xy_exp = None (親クラスで無効化)
-        # 新: lin_vel_xコマンドに追従して前進
+        # === 変更3: 前進報酬を有効化（重み緩め） ===
+        # 旧: weight=1.0
+        # 新: スタイル報酬を優先するため緩める
         self.rewards.track_lin_vel_xy_exp = RewTerm(
             func=mdp.track_lin_vel_xy_exp,
-            weight=1.0,
+            weight=0.5,
             params={"std": 0.5, "command_name": "base_velocity"},
         )
 
@@ -560,6 +565,16 @@ class H1VisionRoughEnvCfg_HeadingFixed(H1VisionRoughEnvCfg):
         # 旧: track_ang_vel_z_exp.weight = 2.0 (親クラス)
         # 新: heading報酬と競合するため無効化
         self.rewards.track_ang_vel_z_exp = None
+
+        # === 変更5: スタイル報酬を強化 ===
+        self.rewards.style_tracking.weight = 5.0
+
+        # === 変更6: スタイルを邪魔するペナルティを緩める ===
+        # 関節のデフォルト維持を緩めて、多様な歩き方を許容
+        self.rewards.joint_deviation_hip.weight = -0.05     # -0.2 → -0.05
+        self.rewards.joint_deviation_arms.weight = -0.05    # -0.2 → -0.05
+        self.rewards.joint_deviation_torso.weight = -0.02   # -0.1 → -0.02
+        self.rewards.flat_orientation_l2.weight = -0.2      # -0.5 → -0.2
 
 
 @configclass

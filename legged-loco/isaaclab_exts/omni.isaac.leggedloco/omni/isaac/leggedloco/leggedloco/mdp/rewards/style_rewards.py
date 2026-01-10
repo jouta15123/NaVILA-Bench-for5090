@@ -19,7 +19,8 @@ def style_reward(
     env: ManagerBasedRLEnv,
     command_name: str,
     beta_text: float = 0.5,
-    beta_centroid: float = 0.5,
+    beta_teacher_motion: float = 0.5,
+    beta_centroid: float | None = None,
     ramp_steps: int = 0,
 ) -> torch.Tensor:
     """
@@ -71,11 +72,13 @@ def style_reward(
     
     # 2. Get Targets
     target_z_onm = cmd_gen.style_latents
-    target_centroid = cmd_gen.centroids
+    target_teacher_motion = cmd_gen.teacher_motion_latents
     
     # 3. Compute
-    reward, r_text, r_centroid = cmd_gen.style_module.compute_current_reward(
-        target_z_onm, target_centroid, beta_text, beta_centroid
+    if beta_centroid is not None:
+        beta_teacher_motion = beta_centroid
+    reward, r_text, r_teacher_motion = cmd_gen.style_module.compute_current_reward(
+        target_z_onm, target_teacher_motion, beta_text, beta_teacher_motion
     )
     reward_raw = reward
     
@@ -90,7 +93,7 @@ def style_reward(
     # Log metrics to env.extras (for IsaacLab internal logging)
     if hasattr(env, "extras"):
         env.extras["metrics/style_text_sim"] = r_text.mean()
-        env.extras["metrics/style_centroid_sim"] = r_centroid.mean()
+        env.extras["metrics/style_teacher_motion_sim"] = r_teacher_motion.mean()
         env.extras["metrics/style_reward_raw"] = reward_raw.mean()
         env.extras["metrics/style_reward_scaled"] = reward.mean()
         env.extras["metrics/style_reward_scale"] = torch.tensor(scale, device=env.device)
@@ -110,7 +113,7 @@ def style_reward(
         try:
             wandb.log({
                 "debug/style_text_sim": r_text.mean().item(),
-                "debug/style_centroid_sim": r_centroid.mean().item(),
+                "debug/style_teacher_motion_sim": r_teacher_motion.mean().item(),
                 "debug/style_reward_raw": reward_raw.mean().item(),
                 "debug/style_reward_scaled": reward.mean().item(),
                 "debug/style_reward_min": reward.min().item(),

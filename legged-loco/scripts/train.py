@@ -112,8 +112,26 @@ parser.add_argument("--use_rnn", action="store_true", default=False, help="Use R
 parser.add_argument("--history_length", default=0, type=int, help="Length of history buffer.")
 parser.add_argument("--style_weight", type=float, default=None, help="Override style reward weight.")
 parser.add_argument("--style_beta_text", type=float, default=None, help="Override style reward beta_text.")
-parser.add_argument("--style_beta_centroid", type=float, default=None, help="Override style reward beta_centroid.")
+parser.add_argument(
+    "--style_beta_teacher_motion",
+    type=float,
+    default=None,
+    help="Override style reward beta_teacher_motion (teacher motion latent similarity).",
+)
+parser.add_argument(
+    "--style_beta_centroid",
+    type=float,
+    default=None,
+    help="Deprecated. Use --style_beta_teacher_motion instead.",
+)
 parser.add_argument("--style_ramp_steps", type=int, default=None, help="Override style reward ramp steps.")
+parser.add_argument(
+    "--style_centroid_mode",
+    type=str,
+    default=None,
+    choices=["centroid", "random"],
+    help="Centroid selection mode for style reward. Overrides STYLE_CENTROID_MODE env var.",
+)
 parser.add_argument(
     "--terrain",
     type=str,
@@ -168,6 +186,10 @@ torch.backends.cudnn.benchmark = False
 
 def main():
     """Train with RSL-RL agent."""
+    # Apply centroid mode before env construction (StyleModule reads env var at init).
+    if args_cli.style_centroid_mode is not None:
+        os.environ["STYLE_CENTROID_MODE"] = args_cli.style_centroid_mode
+
     # parse configuration
     # env_cfg: ManagerBasedRLEnvCfg = parse_env_cfg(
     #     args_cli.task, use_gpu=not args_cli.cpu, num_envs=args_cli.num_envs, use_fabric=not args_cli.disable_fabric
@@ -181,8 +203,11 @@ def main():
             env_cfg.rewards.style_tracking.weight = args_cli.style_weight
         if args_cli.style_beta_text is not None:
             env_cfg.rewards.style_tracking.params["beta_text"] = args_cli.style_beta_text
-        if args_cli.style_beta_centroid is not None:
-            env_cfg.rewards.style_tracking.params["beta_centroid"] = args_cli.style_beta_centroid
+        beta_teacher_motion = args_cli.style_beta_teacher_motion
+        if beta_teacher_motion is None and args_cli.style_beta_centroid is not None:
+            beta_teacher_motion = args_cli.style_beta_centroid
+        if beta_teacher_motion is not None:
+            env_cfg.rewards.style_tracking.params["beta_teacher_motion"] = beta_teacher_motion
         if args_cli.style_ramp_steps is not None:
             env_cfg.rewards.style_tracking.params["ramp_steps"] = args_cli.style_ramp_steps
     if args_cli.style_list is not None and hasattr(env_cfg, "commands"):

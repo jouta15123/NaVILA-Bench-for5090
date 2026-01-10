@@ -390,18 +390,21 @@ def objective(trial: optuna.Trial, args) -> float:
                 return 0.0
             last_metrics = json.loads(lines[-1])
 
-        # Use M→T R@1 + silhouette as the objective (higher is better)
+        # Use Avg(M→T R@1, T→M R@1) + silhouette as the objective (higher is better)
         m2t_r1 = last_metrics.get("m2t", {}).get("R@1", 0.0)
         m2t_r3 = last_metrics.get("m2t", {}).get("R@3", 0.0)
+        t2m_r1 = last_metrics.get("t2m", {}).get("R@1", 0.0)
         silhouette = last_metrics.get("silhouette", -1.0)
         if isinstance(silhouette, (int, float)):
             silhouette_val = float(silhouette)
         else:
             silhouette_val = -1.0
-        objective_value = m2t_r1 + args.silhouette_weight * silhouette_val
+        avg_r1 = 0.5 * (m2t_r1 + t2m_r1)
+        objective_value = avg_r1 + args.silhouette_weight * silhouette_val
 
         print(
             f"\nTrial {trial.number} Result: M2T R@1={m2t_r1:.3f}, "
+            f"T2M R@1={t2m_r1:.3f}, AvgR@1={avg_r1:.3f}, "
             f"R@3={m2t_r3:.3f}, Sil={silhouette_val:.3f}, "
             f"Obj={objective_value:.3f}"
         )
@@ -450,7 +453,7 @@ def main():
         "--best-metric",
         type=str,
         choices=["acc@1", "m2t_r@1", "t2m_r@1", "avg_r@1"],
-        default="m2t_r@1",
+        default="avg_r@1",
         help="Metric used to select the best checkpoint during training.",
     )
     parser.add_argument(
@@ -550,7 +553,7 @@ def main():
     print("="*60)
 
     print(f"\nBest trial: {study.best_trial.number}")
-    print(f"Best M2T R@1: {study.best_value:.4f}")
+    print(f"Best Avg R@1: {study.best_value:.4f}")
     print(f"Best params:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")

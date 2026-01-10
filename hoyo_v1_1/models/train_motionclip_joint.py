@@ -1194,7 +1194,6 @@ def parse_args():
     parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (user or team)")
     parser.add_argument("--wandb-group", type=str, default=None, help="W&B group name")
     parser.add_argument("--run-name", type=str, default=None, help="Optional name for the run directory")
-    parser.add_argument("--use-aug", action="store_true", help="Enable data augmentation (flip, rotation) during training")
     parser.add_argument(
         "--snapshot-splits",
         type=str,
@@ -1323,7 +1322,7 @@ def main():
         INSTRUCTION_ONOMATOPEIA,
         target_len=target_len,
         is_train=True,
-        use_aug=args.use_aug,
+        use_aug=False,
         view_filter=args.view_filter,
         centering=centering,
     )
@@ -1395,7 +1394,7 @@ def main():
             "log_interval": args.log_interval,
             "eval_interval": args.eval_interval,
             "vis_max_per_label": args.vis_max_per_label,
-            "use_aug": args.use_aug,
+            "use_aug": False,
             "view_filter": args.view_filter,
             "snapshot_splits": args.snapshot_splits,
             "retrieval_ks": args.retrieval_ks,

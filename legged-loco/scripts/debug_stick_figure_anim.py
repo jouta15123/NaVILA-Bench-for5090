@@ -109,7 +109,7 @@ parser.add_argument(
     help="Override robot USD path (e.g., /workspace/NaVILA-Bench/h1_hand_head.usd for explicit markers).",
 )
 parser.add_argument("--frames", type=int, default=100, help="Number of frames to record (default: 100 = 2sec @ 50Hz).")
-parser.add_argument("--save_path", type=str, default="h1_stick_figure.gif", help="Output GIF path.")
+parser.add_argument("--save_path", type=str, default="h1_stick_figure_offset.gif", help="Output GIF path.")
 parser.add_argument("--gif_fps", type=int, default=50, help="GIF/MP4 playback FPS (default: 50 to match Isaac Sim control rate).")
 parser.add_argument("--disable_gravity", action="store_true", help="Disable gravity to keep robot upright.")
 parser.add_argument("--use_markers", action="store_true", help="Use marker prims (head/neck/hand) if present.")
@@ -193,6 +193,46 @@ parser.add_argument(
     action="store_true",
     help="Exit after dumping offsets (no rollout/animation).",
 )
+parser.add_argument(
+    "--dump_offsets_body",
+    action="store_true",
+    help="Compute offsets in physics body frame (uses body_pos_w/body_quat_w).",
+)
+parser.add_argument(
+    "--save_per_env",
+    action="store_true",
+    help="Save per-env GIFs with _env{idx} suffix.",
+)
+parser.add_argument(
+    "--save_dir",
+    type=str,
+    default=None,
+    help="Directory to save per-env GIFs/features (default: directory of save_path).",
+)
+parser.add_argument(
+    "--max_envs_to_save",
+    type=int,
+    default=None,
+    help="Limit number of envs to save (useful for large num_envs).",
+)
+parser.add_argument(
+    "--feature_mode",
+    type=str,
+    default="keymap",
+    choices=["none", "keymap", "latent", "both"],
+    help="Features to collect (keymap=2D joints, latent=MotionCLIP).",
+)
+parser.add_argument(
+    "--feature_stride",
+    type=int,
+    default=1,
+    help="Stride (frames) for feature collection.",
+)
+parser.add_argument(
+    "--save_features",
+    action="store_true",
+    help="Save collected features to NPZ files.",
+)
 # Missing args required by parse_rsl_rl_cfg
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--use_cnn", action="store_true", default=None, help="Use CNN")
@@ -210,6 +250,7 @@ simulation_app = app_launcher.app
 
 import gymnasium as gym
 import torch
+import isaaclab.utils.math as math_utils
 import isaaclab_tasks
 import omni.isaac.leggedloco.config
 from isaaclab_tasks.utils import parse_env_cfg, get_checkpoint_path
@@ -446,6 +487,47 @@ def _compute_offsets_from_markers(marker_prims, xform_cache):
         l_parent = _find_parent_by_name(marker_prims["l_hand"], ["left_elbow_link", "left_elbow"])
         offsets["l_hand"] = _extract_local_offset(l_parent, marker_prims["l_hand"], xform_cache)
         parents["l_hand"] = str(l_parent.GetPath())
+    return offsets, parents
+
+
+def _find_body_index_by_name(body_names, target_name):
+    for idx, name in enumerate(body_names):
+        if target_name in name:
+            return idx
+    return None
+
+
+def _compute_offsets_from_markers_body(marker_prims, xform_cache, robot):
+    """Compute offsets using physics body frame (body_pos_w/body_quat_w)."""
+    offsets = {}
+    parents = {}
+    body_pos_w = robot.data.body_pos_w
+    body_quat_w = robot.data.body_quat_w
+    body_names = list(robot.data.body_names)
+    device = body_pos_w.device
+
+    def _offset_for(role, parent_candidates):
+        prim = marker_prims.get(role)
+        if prim is None:
+            return
+        parent = _find_parent_by_name(prim, parent_candidates)
+        parent_name = parent.GetName()
+        body_idx = _find_body_index_by_name(body_names, parent_name)
+        if body_idx is None:
+            return
+        xform_cache.Clear()
+        mat = xform_cache.GetLocalToWorldTransform(prim)
+        pos = mat.ExtractTranslation()
+        marker_pos = torch.tensor([pos[0], pos[1], pos[2]], device=device, dtype=body_pos_w.dtype)
+        delta = marker_pos - body_pos_w[:, body_idx]
+        offset_local = math_utils.quat_rotate_inverse(body_quat_w[:, body_idx], delta)
+        offsets[role] = [float(v) for v in offset_local[0].tolist()]
+        parents[role] = str(parent.GetPath())
+
+    _offset_for("head", ["torso_link", "torso"])
+    _offset_for("neck", ["torso_link", "torso"])
+    _offset_for("r_hand", ["right_elbow_link", "right_elbow"])
+    _offset_for("l_hand", ["left_elbow_link", "left_elbow"])
     return offsets, parents
 
 
@@ -741,7 +823,10 @@ def main():
 
     # Dump offsets from marker prims if requested.
     if marker_prims and xform_cache and (args_cli.dump_offsets or args_cli.dump_offsets_path):
-        offsets, parents = _compute_offsets_from_markers(marker_prims, xform_cache)
+        if args_cli.dump_offsets_body:
+            offsets, parents = _compute_offsets_from_markers_body(marker_prims, xform_cache, robot)
+        else:
+            offsets, parents = _compute_offsets_from_markers(marker_prims, xform_cache)
         if offsets:
             print("[INFO] Marker parent paths:")
             for key, path in parents.items():
@@ -759,7 +844,12 @@ def main():
             simulation_app.close()
             return
 
-    history_2d = []
+    num_envs = env.unwrapped.num_envs
+    history_2d = [[] for _ in range(num_envs)]
+    collect_keymap = args_cli.feature_mode in ("keymap", "both")
+    collect_latent = args_cli.feature_mode in ("latent", "both")
+    feature_stride = max(1, int(args_cli.feature_stride))
+    history_latent = [[] for _ in range(num_envs)] if collect_latent else None
     video_frames = []
     env_render_enabled = not args_cli.no_env_render
     
@@ -853,18 +943,25 @@ def main():
                      standardize=args_cli.standardize,
                      normalize_height=not args_cli.no_normalize_height,
                  )
-                 latest_frame_2d = full_buffer_2d[0, -1].detach().cpu().numpy() # (14, 2)
-                 history_2d.append(latest_frame_2d)
+                 latest_frames_2d = full_buffer_2d[:, -1].detach().cpu().numpy()  # (B, 14, 2)
+                 for env_id in range(num_envs):
+                     history_2d[env_id].append(latest_frames_2d[env_id])
+                 if collect_latent and ((i - warmup_steps) % feature_stride == 0):
+                     z_m = style_module.encode_buffer()  # (B, 512)
+                     z_m_np = z_m.detach().cpu().numpy()
+                     for env_id in range(num_envs):
+                         history_latent[env_id].append(z_m_np[env_id])
                  
                  # Debug: print coordinates every 100 frames
                  if (i - warmup_steps) % 100 == 0:
-                     print(f"[Frame {i - warmup_steps}] 2D coords (x=lateral, y=down):")
-                     print(f"  Head(0): {latest_frame_2d[0]}")
-                     print(f"  Neck(1): {latest_frame_2d[1]}")
-                     print(f"  R-Shoulder(2): {latest_frame_2d[2]}")
-                     print(f"  L-Shoulder(5): {latest_frame_2d[5]}")
-                     print(f"  R-Hip(8): {latest_frame_2d[8]}")
-                     print(f"  R-Ankle(10): {latest_frame_2d[10]}")
+                     env0 = latest_frames_2d[0]
+                     print(f"[Frame {i - warmup_steps}] 2D coords (env0, x=lateral, y=down):")
+                     print(f"  Head(0): {env0[0]}")
+                     print(f"  Neck(1): {env0[1]}")
+                     print(f"  R-Shoulder(2): {env0[2]}")
+                     print(f"  L-Shoulder(5): {env0[5]}")
+                     print(f"  R-Hip(8): {env0[8]}")
+                     print(f"  R-Ankle(10): {env0[10]}")
 
         # Handle resets
         # If any env is done, we reset everything for simplicity in this single-stream debug
@@ -902,12 +999,14 @@ def main():
     else:
         print("[INFO] No env frames captured. Skipping MP4 export.")
 
-    # Plotting
-    fig, ax = plt.subplots(figsize=(6, 6))
+    def _save_gif(history_env, out_path):
+        if len(history_env) == 0:
+            print(f"[WARN] No frames collected for {out_path}. Skipping GIF.")
+            return
+        fig, ax = plt.subplots(figsize=(6, 6))
 
-    # Auto-scale axes from collected keypoints so the full body is visible.
-    if len(history_2d) > 0:
-        all_data = np.stack(history_2d, axis=0)  # (T, 14, 2)
+        # Auto-scale axes from collected keypoints so the full body is visible.
+        all_data = np.stack(history_env, axis=0)  # (T, 14, 2)
         x_all = all_data[..., 0]
         y_all = -all_data[..., 1]  # flip for display (up positive)
         x_min, x_max = float(np.min(x_all)), float(np.max(x_all))
@@ -917,41 +1016,66 @@ def main():
         pad_y = max(0.05, 0.1 * (y_max - y_min))
         ax.set_xlim(x_min - pad_x, x_max + pad_x)
         ax.set_ylim(y_min - pad_y, y_max + pad_y)
+        
+        scat = ax.scatter([], [], c="r", s=20)
+        lines = [ax.plot([], [], "b-")[0] for _ in SKELETON_EDGES]
+        text = ax.text(0.05, 0.9, "", transform=ax.transAxes)
+
+        def update(frame_idx):
+            data = history_env[frame_idx]  # (14, 2)
+            x = data[:, 0]
+            y = -data[:, 1]  # Flip Y so Up is Positive for visualization
+            scat.set_offsets(np.c_[x, y])
+            for line, (i, j) in zip(lines, SKELETON_EDGES):
+                line.set_data([x[i], x[j]], [y[i], y[j]])
+            text.set_text(f"Frame: {frame_idx}")
+            return [scat, text] + lines
+
+        ani = animation.FuncAnimation(fig, update, frames=len(history_env), blit=True)
+        try:
+            print(f"Saving GIF: {out_path}")
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            ani.save(out_path, writer=PillowWriter(fps=args_cli.gif_fps))
+        except Exception as e:
+            print(f"Error saving animation: {e}")
+            import traceback
+            traceback.print_exc()
+
+    base_out = os.path.abspath(args_cli.save_path)
+    base_dir = args_cli.save_dir or os.path.dirname(base_out) or "."
+    base_root, base_ext = os.path.splitext(os.path.basename(base_out))
+    if not base_ext:
+        base_ext = ".gif"
+    env_ids = list(range(num_envs))
+    if args_cli.max_envs_to_save is not None:
+        env_ids = env_ids[: max(0, int(args_cli.max_envs_to_save))]
+
+    if args_cli.save_per_env:
+        for env_id in env_ids:
+            out_path = os.path.join(base_dir, f"{base_root}_env{env_id}{base_ext}")
+            _save_gif(history_2d[env_id], out_path)
     else:
-        # Fallback: reasonable defaults for meter-scale visualization
-        ax.set_xlim(-1.0, 1.0)
-        ax.set_ylim(-0.5, 2.0)
-    
-    # Plot y = -y to flip "Down is Positive" (HOYO) to "Up is Positive" (Plot)
-    
-    scat = ax.scatter([], [], c='r', s=20)
-    lines = [ax.plot([], [], 'b-')[0] for _ in SKELETON_EDGES]
-    text = ax.text(0.05, 0.9, '', transform=ax.transAxes)
+        out_path = base_out if args_cli.save_dir is None else os.path.join(base_dir, f"{base_root}{base_ext}")
+        _save_gif(history_2d[0], out_path)
 
-    def update(frame_idx):
-        data = history_2d[frame_idx] # (14, 2)
-        x = data[:, 0]
-        y = -data[:, 1] # Flip Y so Up is Positive for visualization
-        
-        scat.set_offsets(np.c_[x, y])
-        
-        for line, (i, j) in zip(lines, SKELETON_EDGES):
-            line.set_data([x[i], x[j]], [y[i], y[j]])
-            
-        text.set_text(f"Frame: {frame_idx}")
-        return [scat, text] + lines
-
-    ani = animation.FuncAnimation(fig, update, frames=len(history_2d), blit=True)
-    try:
-        print("Saving GIF... (this might take a moment)")
-        out_path = os.path.abspath(args_cli.save_path)
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        ani.save(out_path, writer=PillowWriter(fps=args_cli.gif_fps))
-        print("Saved:", out_path)
-    except Exception as e:
-        print(f"Error saving animation: {e}")
-        import traceback
-        traceback.print_exc()
+    if args_cli.save_features and args_cli.feature_mode != "none":
+        for env_id in env_ids if args_cli.save_per_env else [0]:
+            feat_path = os.path.join(base_dir, f"{base_root}_env{env_id}_features.npz")
+            payload = {}
+            if collect_keymap:
+                if len(history_2d[env_id]) > 0:
+                    payload["keymap_2d"] = np.stack(history_2d[env_id], axis=0)
+                else:
+                    payload["keymap_2d"] = np.empty((0, 14, 2), dtype=np.float32)
+            if collect_latent:
+                if history_latent and len(history_latent[env_id]) > 0:
+                    payload["latent"] = np.stack(history_latent[env_id], axis=0)
+                else:
+                    payload["latent"] = np.empty((0, 512), dtype=np.float32)
+                payload["latent_stride"] = np.array([feature_stride], dtype=np.int32)
+            payload["coord_mode"] = np.array([style_module.coord_mode if style_module else "unknown"])
+            np.savez(feat_path, **payload)
+            print(f"[INFO] Saved features: {feat_path}")
 
     env.close()
     simulation_app.close()

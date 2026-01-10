@@ -19,7 +19,7 @@ from omni.isaac.leggedloco.leggedloco.mdp.style_module import StyleModule, INSTR
 class StyleCommandGenerator(CommandTerm):
     """
     Command generator that produces style latents based on onomatopoeia.
-    Uses StyleModule to encode text into z_onm and retrieve centroids.
+    Uses StyleModule to encode text into z_onm and retrieve teacher motion latents.
     """
 
     def __init__(self, cfg : StyleCommandGeneratorCfg, env: ManagerBasedRLEnv):
@@ -36,12 +36,14 @@ class StyleCommandGenerator(CommandTerm):
         )
 
         # Buffers
-        # command: [z_onm (512), centroid (512)] -> 1024 dim
+        # command: [z_onm (512), teacher_motion (512)] -> 1024 dim
         # We might want to separate them, but CommandTerm usually returns a single tensor.
         # We will return concatenated tensor.
         self._command = torch.zeros(self.num_envs, 1024, device=self.device)
         self.style_latents = torch.zeros(self.num_envs, 512, device=self.device)
-        self.centroids = torch.zeros(self.num_envs, 512, device=self.device)
+        self.teacher_motion_latents = torch.zeros(self.num_envs, 512, device=self.device)
+        # Backward-compatible alias (deprecated): keep "centroids" for older code paths.
+        self.centroids = self.teacher_motion_latents
 
         # Keep track of current text for debugging/logging
         self.current_texts = [""] * self.num_envs
@@ -123,16 +125,16 @@ class StyleCommandGenerator(CommandTerm):
 
             # Encode
             # Note: encode_instruction returns (1, D) tensors, squeeze to (D,)
-            z_onm, centroid = self.style_module.encode_instruction(text)
+            z_onm, teacher_motion = self.style_module.encode_instruction(text)
             z_onm = z_onm.squeeze(0)  # (1, D) -> (D,)
-            centroid = centroid.squeeze(0)  # (1, D) -> (D,)
+            teacher_motion = teacher_motion.squeeze(0)  # (1, D) -> (D,)
 
             self.style_latents[env_id] = z_onm
-            self.centroids[env_id] = centroid
+            self.teacher_motion_latents[env_id] = teacher_motion
 
         # Update command buffer
         self._command[env_ids, :512] = self.style_latents[env_ids]
-        self._command[env_ids, 512:] = self.centroids[env_ids]
+        self._command[env_ids, 512:] = self.teacher_motion_latents[env_ids]
 
     def _update_metrics(self):
         pass

@@ -148,6 +148,8 @@ parser.add_argument(
     default=None,
     help="JSON mapping for style -> speed. Value can be float (lin_vel_x) or dict.",
 )
+parser.add_argument("--debug_quat", action="store_true", default=False, help="Log one quaternion to verify order.")
+parser.add_argument("--debug_dones", action="store_true", default=False, help="Log done/reset signals once.")
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -179,6 +181,7 @@ from rsl_rl.runners import OnPolicyRunner
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.io import load_yaml
 from isaaclab.utils import update_class_from_dict
+import isaaclab.utils.math as math_utils
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
@@ -203,24 +206,33 @@ def _get_command_tensor(command_term):
     return None
 
 
+def _as_env_ids(env_ids, num_envs: int, device: torch.device) -> torch.Tensor:
+    if isinstance(env_ids, slice):
+        return torch.arange(num_envs, device=device, dtype=torch.long)[env_ids]
+    if torch.is_tensor(env_ids):
+        return env_ids.to(device=device, dtype=torch.long)
+    return torch.tensor(list(env_ids), device=device, dtype=torch.long)
+
+
 def _set_base_velocity_for_envs(command_term, env_ids, cmd: dict) -> bool:
     cmd_tensor = _get_command_tensor(command_term)
     if cmd_tensor is None:
         return False
+    env_ids_tensor = _as_env_ids(env_ids, cmd_tensor.shape[0], cmd_tensor.device)
+    if env_ids_tensor.numel() == 0:
+        return True
     lin_x = float(cmd.get("lin_vel_x", 0.0))
     lin_y = float(cmd.get("lin_vel_y", 0.0))
     ang_z = float(cmd.get("ang_vel_z", 0.0))
     heading = float(cmd.get("heading", 0.0))
-    for env_id in env_ids:
-        idx = int(env_id)
-        if cmd_tensor.shape[1] > 0:
-            cmd_tensor[idx, 0] = lin_x
-        if cmd_tensor.shape[1] > 1:
-            cmd_tensor[idx, 1] = lin_y
-        if cmd_tensor.shape[1] > 2:
-            cmd_tensor[idx, 2] = ang_z
-        if cmd_tensor.shape[1] > 3:
-            cmd_tensor[idx, 3] = heading
+    if cmd_tensor.shape[1] > 0:
+        cmd_tensor[env_ids_tensor, 0] = lin_x
+    if cmd_tensor.shape[1] > 1:
+        cmd_tensor[env_ids_tensor, 1] = lin_y
+    if cmd_tensor.shape[1] > 2:
+        cmd_tensor[env_ids_tensor, 2] = ang_z
+    if cmd_tensor.shape[1] > 3:
+        cmd_tensor[env_ids_tensor, 3] = heading
     return True
 
 
@@ -317,6 +329,36 @@ def resolve_checkpoint_path(path: str) -> str:
     return path
 
 
+def seed_everything(seed: int | None) -> None:
+    if seed is None:
+        return
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def maybe_seed_env(env, seed: int | None) -> None:
+    if seed is None:
+        return
+    for target in (env, getattr(env, "unwrapped", None)):
+        if target is None:
+            continue
+        if hasattr(target, "reset"):
+            try:
+                target.reset(seed=seed)
+                return
+            except TypeError:
+                pass
+        if hasattr(target, "seed"):
+            try:
+                target.seed(seed)
+                return
+            except Exception:
+                pass
+
+
 def infer_obs_dims_from_checkpoint(ckpt_path: str) -> tuple[int | None, int | None]:
     try:
         data = torch.load(ckpt_path, map_location="cpu")
@@ -411,8 +453,16 @@ def build_hoyo_reference_cache(
     samples_per_label: int,
     stats_path: Path,
     seed: int,
+    centering: str = "first_frame_com",
 ) -> dict:
-    dataset = HoyoInstructionDataset(hoyo_root, labels, target_len=target_len, is_train=False, use_aug=False)
+    dataset = HoyoInstructionDataset(
+        hoyo_root,
+        labels,
+        target_len=target_len,
+        is_train=False,
+        use_aug=False,
+        centering=centering,
+    )
     apply_normalization_from_stats(dataset, stats_path)
     rng = random.Random(seed)
     cache = {}
@@ -469,17 +519,24 @@ def compute_hoyo_error(
     return min(l2_sequence_error(seq, ref) for ref in refs)
 
 
-def _set_style_for_envs(style_gen, env_ids, onomatopoeia: str) -> None:
-    z_onm, centroid = style_gen.style_module.encode_instruction(onomatopoeia)
-    z_onm = z_onm.squeeze(0)
-    centroid = centroid.squeeze(0)
-    for env_id in env_ids:
-        env_id = int(env_id)
-        style_gen.current_texts[env_id] = onomatopoeia
-        style_gen.style_latents[env_id] = z_onm
-        style_gen.centroids[env_id] = centroid
-        style_gen._command[env_id, :512] = z_onm
-        style_gen._command[env_id, 512:] = centroid
+def _set_style_for_envs(style_gen, env_ids, onomatopoeia: str, style_cache: dict | None = None) -> None:
+    if style_cache is not None and onomatopoeia in style_cache:
+        z_onm, teacher_motion = style_cache[onomatopoeia]
+    else:
+        z_onm, teacher_motion = style_gen.style_module.encode_instruction(onomatopoeia)
+        z_onm = z_onm.squeeze(0)
+        teacher_motion = teacher_motion.squeeze(0)
+        if style_cache is not None:
+            style_cache[onomatopoeia] = (z_onm, teacher_motion)
+    env_ids_tensor = _as_env_ids(env_ids, style_gen.num_envs, style_gen._command.device)
+    if env_ids_tensor.numel() == 0:
+        return
+    for env_id in env_ids_tensor.tolist():
+        style_gen.current_texts[int(env_id)] = onomatopoeia
+    style_gen.style_latents[env_ids_tensor] = z_onm
+    style_gen.teacher_motion_latents[env_ids_tensor] = teacher_motion
+    style_gen._command[env_ids_tensor, :512] = z_onm
+    style_gen._command[env_ids_tensor, 512:] = teacher_motion
 
 
 def _detect_falls(env, dones: torch.Tensor, extras: dict | None) -> torch.Tensor:
@@ -505,15 +562,18 @@ def _detect_falls(env, dones: torch.Tensor, extras: dict | None) -> torch.Tensor
     return done_mask
 
 
-def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device, 
-                          record_video: bool = False, video_path: str = None,
+def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device,
+                          record_video: bool = False, video_path: str | None = None,
                           teacher_cache: dict | None = None,
                           hoyo_metric: str = "dtw",
                           hoyo_eval_interval: int = 10,
                           hoyo_dtw_band: int = 10,
                           base_velocity_mode: str = "env",
                           base_cmd_default: dict | None = None,
-                          style_speed_table: dict | None = None):
+                          style_speed_table: dict | None = None,
+                          style_cache: dict | None = None,
+                          debug_quat: bool = False,
+                          debug_dones: bool = False):
     """Evaluate a single onomatopoeia and collect metrics."""
     
     # Force set the style command for all envs
@@ -534,7 +594,7 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
     
     # Manually set the onomatopoeia for all environments AFTER reset
     # (reset triggers command resampling, so set style after it).
-    _set_style_for_envs(style_gen, range(env.unwrapped.num_envs), onomatopoeia)
+    _set_style_for_envs(style_gen, range(env.unwrapped.num_envs), onomatopoeia, style_cache=style_cache)
 
     # Optionally override base_velocity command (fixed or style-dependent)
     if base_cmd_term is not None and base_velocity_mode != "env":
@@ -547,14 +607,15 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
     obs, _ = env.get_observations()
     
     # Video recording setup
-    frames = []
-    if record_video:
+    writer = None
+    if record_video and video_path:
         base_env = env.unwrapped
         # Set initial camera
         robot_pos_w = base_env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
         cam_eye = (robot_pos_w[0] + 3.0, robot_pos_w[1] + 3.0, robot_pos_w[2] + 2.0)
         cam_target = (robot_pos_w[0], robot_pos_w[1], robot_pos_w[2])
         base_env.sim.set_camera_view(eye=cam_eye, target=cam_target)
+        writer = imageio.get_writer(video_path, fps=50)
     
     # Metrics storage
     metrics = {
@@ -570,14 +631,20 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "pitch": [],
         "episode_lengths": [],
         "text_sims": [],
-        "centroid_sims": [],
+        "teacher_motion_sims": [],
         "hoyo_errors": [],
     }
+    # Per-env accumulators (lightweight)
+    num_envs = env.unwrapped.num_envs
+    vel_x_sum = torch.zeros(num_envs, device=device)
+    vel_x_count = torch.zeros(num_envs, device=device)
     
     episode_step_counts = torch.zeros(env.unwrapped.num_envs, device=device)
     fall_count = 0
     episode_count = 0
     
+    quat_logged = False
+    done_logged = False
     for step in tqdm(range(num_steps), desc=f"Evaluating {onomatopoeia}"):
         # Use no_grad instead of inference_mode to avoid creating inference tensors
         # that later reject in-place updates during env.reset().
@@ -587,8 +654,9 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
             
             # Get robot state
             robot = env.unwrapped.scene["robot"]
-            base_lin_vel = robot.data.root_lin_vel_w  # (N, 3)
-            base_ang_vel = robot.data.root_ang_vel_w  # (N, 3)
+            # Use body-frame velocities for consistency with training rewards.
+            base_lin_vel = getattr(robot.data, "root_lin_vel_b", robot.data.root_lin_vel_w)  # (N, 3)
+            base_ang_vel = getattr(robot.data, "root_ang_vel_b", robot.data.root_ang_vel_w)  # (N, 3)
             root_quat = robot.data.root_quat_w  # (N, 4)
 
             # Log commanded base_velocity (if available)
@@ -608,23 +676,40 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
             metrics["velocities_z"].append(base_lin_vel[:, 2].mean().item())
             metrics["angular_vel_z"].append(base_ang_vel[:, 2].mean().item())
             
-            # Get roll/pitch from quaternion
-            # quat: (w, x, y, z) or (x, y, z, w) - need to check
-            # Assuming (w, x, y, z) format
-            w, x, y, z = root_quat[:, 0], root_quat[:, 1], root_quat[:, 2], root_quat[:, 3]
-            roll = torch.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
-            pitch = torch.asin(torch.clamp(2*(w*y - z*x), -1, 1))
+            # Get roll/pitch via IsaacLab math_utils (expects wxyz)
+            rpy = math_utils.euler_xyz_from_quat(root_quat)
+            if isinstance(rpy, tuple):
+                roll, pitch = rpy[0], rpy[1]
+            else:
+                roll = rpy[:, 0]
+                pitch = rpy[:, 1]
+            # Wrap to [-pi, pi] before taking abs to avoid 2π wrap artifacts.
+            roll = math_utils.wrap_to_pi(roll)
+            pitch = math_utils.wrap_to_pi(pitch)
             
             metrics["roll"].append(roll.abs().mean().item())
             metrics["pitch"].append(pitch.abs().mean().item())
+            # Per-env mean velocity (for dispersion diagnostics)
+            vel_x_sum += base_lin_vel[:, 0]
+            vel_x_count += 1.0
+
+            if debug_quat and not quat_logged:
+                q0 = root_quat[0].detach().cpu().numpy()
+                rpy_wxyz = quat2eulers(q0[0], q0[1], q0[2], q0[3])
+                rpy_xyzw = quat2eulers(q0[3], q0[0], q0[1], q0[2])
+                print(f"[DEBUG] root_quat_w[0]={q0} (wxyz? w={q0[0]:.4f}, w_last={q0[3]:.4f})")
+                print(f"[DEBUG] rpy(wxyz)={rpy_wxyz} | rpy(xyzw)={rpy_xyzw}")
+                quat_logged = True
             
             # Get style similarity from extras
             if hasattr(env.unwrapped, "extras"):
                 extras = env.unwrapped.extras
                 if "metrics/style_text_sim" in extras:
                     metrics["text_sims"].append(extras["metrics/style_text_sim"].item())
-                if "metrics/style_centroid_sim" in extras:
-                    metrics["centroid_sims"].append(extras["metrics/style_centroid_sim"].item())
+                if "metrics/style_teacher_motion_sim" in extras:
+                    metrics["teacher_motion_sims"].append(extras["metrics/style_teacher_motion_sim"].item())
+                elif "metrics/style_centroid_sim" in extras:
+                    metrics["teacher_motion_sims"].append(extras["metrics/style_centroid_sim"].item())
             
             # Track episode lengths and falls
             episode_step_counts += 1
@@ -638,13 +723,24 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                 fall_count += int(fall_mask.sum().item())
                 episode_count += int(dones.sum().item())
                 # Enforce fixed style after reset
-                _set_style_for_envs(style_gen, done_ids, onomatopoeia)
+                _set_style_for_envs(style_gen, done_ids, onomatopoeia, style_cache=style_cache)
                 if base_cmd_term is not None and base_velocity_mode != "env":
                     if base_velocity_mode == "style_table":
                         base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
                     else:
                         base_cmd = base_cmd_default
                     _set_base_velocity_for_envs(base_cmd_term, done_ids, base_cmd)
+
+                if debug_dones and not done_logged:
+                    ep_len_buf = getattr(env.unwrapped, "episode_length_buf", None)
+                    reset_buf = getattr(env.unwrapped, "reset_buf", None)
+                    msg = f"[DEBUG] dones env_ids={done_ids}"
+                    if ep_len_buf is not None:
+                        msg += f" | episode_length_buf={ep_len_buf[done_ids].detach().cpu().tolist()}"
+                    if reset_buf is not None:
+                        msg += f" | reset_buf={reset_buf[done_ids].detach().cpu().tolist()}"
+                    print(msg)
+                    done_logged = True
 
             # Enforce base_velocity every step to avoid resampling drift
             if base_cmd_term is not None and base_velocity_mode != "env":
@@ -679,11 +775,11 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                     pass
             
             # Record video frame
-            if record_video:
+            if record_video and writer is not None:
                 base_env = env.unwrapped
                 frame = base_env.render()
                 if frame is not None:
-                    frames.append(frame)
+                    writer.append_data(frame)
                 
                 # Update camera to follow robot
                 robot_pos_w = base_env.scene["robot"].data.root_pos_w[0].detach().cpu().numpy()
@@ -693,11 +789,8 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                 base_env.sim.set_camera_view(eye=cam_eye, target=cam_target)
     
     # Save video
-    if record_video and frames and video_path:
+    if writer is not None:
         print(f"    Saving video to: {video_path}")
-        writer = imageio.get_writer(video_path, fps=50)
-        for frame in frames:
-            writer.append_data(frame)
         writer.close()
     
     # Compute summary statistics
@@ -716,13 +809,19 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "mean_pitch": np.mean(metrics["pitch"]),
         "mean_episode_length": np.mean(metrics["episode_lengths"]) if metrics["episode_lengths"] else num_steps,
         "mean_text_sim": np.mean(metrics["text_sims"]) if metrics["text_sims"] else 0.0,
-        "mean_centroid_sim": np.mean(metrics["centroid_sims"]) if metrics["centroid_sims"] else 0.0,
+        "mean_teacher_motion_sim": np.mean(metrics["teacher_motion_sims"]) if metrics["teacher_motion_sims"] else 0.0,
         "fall_rate": (fall_count / episode_count) if episode_count > 0 else 0.0,
         "fall_count": fall_count,
         "episode_count": episode_count,
         "mean_hoyo_error": np.mean(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
         "std_hoyo_error": np.std(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
     }
+    if vel_x_count.sum().item() > 0:
+        vel_x_means = (vel_x_sum / vel_x_count.clamp(min=1.0)).detach().cpu().numpy()
+        summary["env_velocity_x_mean"] = float(np.mean(vel_x_means))
+        summary["env_velocity_x_std"] = float(np.std(vel_x_means))
+        summary["env_velocity_x_median"] = float(np.median(vel_x_means))
+        summary["env_velocity_x_iqr"] = float(np.percentile(vel_x_means, 75) - np.percentile(vel_x_means, 25))
     
     return summary, metrics
 
@@ -757,7 +856,7 @@ def save_results_to_csv(all_results, output_path, timestamp):
             "mean_pitch",
             "mean_episode_length",
             "mean_text_sim",
-            "mean_centroid_sim",
+            "mean_teacher_motion_sim",
             "fall_rate",
             "fall_count",
             "episode_count",
@@ -884,16 +983,20 @@ def main():
         print("[INFO] Overrode reset_base to use reset_root_state_uniform for evaluation.")
     
     # Create environment - always use rgb_array for video recording
+    seed_everything(args_cli.seed)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     if history_length > 0:
         print(f"[INFO] Using RslRlVecEnvHistoryWrapper with history_length={history_length}")
         env = RslRlVecEnvHistoryWrapper(env, history_length=history_length)
     else:
         env = RslRlVecEnvWrapper(env)
+    maybe_seed_env(env, args_cli.seed)
     
     # Load model
     ppo_runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    ppo_runner.load(resume_path)
+    # Optimizer state isn't needed for evaluation and may mismatch when base_policy
+    # parameters are frozen/absent in the checkpoint.
+    ppo_runner.load(resume_path, load_optimizer=False)
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
     
     # Get inference policy
@@ -920,19 +1023,32 @@ def main():
             hoyo_root = Path(args_cli.hoyo_root) if args_cli.hoyo_root else (Path(NAVILA_ROOT) / "hoyo_v1_1")
             run_name = env.unwrapped.command_manager._terms["style_command"].style_module.run_name
             stats_path = resolve_norm_stats_path(hoyo_root, run_name)
+            style_term = env.unwrapped.command_manager._terms.get("style_command", None)
+            buffer_len = 100
+            if style_term is not None and hasattr(style_term, "style_module"):
+                buffer_len = int(getattr(style_term.style_module, "buffer_len", buffer_len))
             teacher_cache = build_hoyo_reference_cache(
                 hoyo_root=hoyo_root,
                 labels=styles_to_eval,
-                target_len=60,
+                target_len=buffer_len,
                 samples_per_label=args_cli.hoyo_samples_per_label,
                 stats_path=stats_path,
                 seed=args_cli.hoyo_seed,
+                centering="first_frame_com",
             )
             print(f"[INFO] HOYO references loaded from: {hoyo_root}")
             print(f"[INFO] HOYO stats path: {stats_path}")
         except Exception as exc:
             print(f"[WARN] Failed to load HOYO references: {exc}")
             teacher_cache = None
+
+    # Precompute style latents to avoid repeated text encoding during resets.
+    style_cache = {}
+    style_term = env.unwrapped.command_manager._terms.get("style_command", None)
+    if style_term is not None:
+        for style in styles_to_eval:
+            z_onm, teacher_motion = style_term.style_module.encode_instruction(style)
+            style_cache[style] = (z_onm.squeeze(0), teacher_motion.squeeze(0))
     
     # Output directory
     output_dir = Path(args_cli.output_dir)
@@ -995,6 +1111,9 @@ def main():
                 base_velocity_mode=args_cli.base_velocity_mode,
                 base_cmd_default=base_cmd_default,
                 style_speed_table=style_speed_table,
+                style_cache=style_cache,
+                debug_quat=args_cli.debug_quat,
+                debug_dones=args_cli.debug_dones,
             )
             
             all_results.append(summary)
@@ -1002,11 +1121,16 @@ def main():
             print(f"  Mean Vel X: {summary['mean_velocity_x']:.3f} ± {summary['std_velocity_x']:.3f}")
             if summary.get("mean_cmd_lin_vel_x") is not None:
                 print(f"  Mean Cmd Vel X: {summary['mean_cmd_lin_vel_x']:.3f}")
+            if summary.get("env_velocity_x_median") is not None:
+                print(
+                    "  Env Vel X (median/IQR): "
+                    f"{summary['env_velocity_x_median']:.3f} / {summary['env_velocity_x_iqr']:.3f}"
+                )
             print(f"  Mean Angular Vel Z: {summary['mean_angular_vel_z']:.3f}")
             print(f"  Mean Roll: {summary['mean_roll']:.4f}")
             print(f"  Mean Pitch: {summary['mean_pitch']:.4f}")
             print(f"  Mean Text Sim: {summary['mean_text_sim']:.4f}")
-            print(f"  Mean Centroid Sim: {summary['mean_centroid_sim']:.4f}")
+            print(f"  Mean Teacher Motion Sim: {summary['mean_teacher_motion_sim']:.4f}")
             print(f"  Mean Episode Length: {summary['mean_episode_length']:.1f}")
             print(f"  Fall Rate: {summary['fall_rate']:.3f} ({summary['fall_count']}/{summary['episode_count']})")
             if summary["mean_hoyo_error"] is not None:
@@ -1044,7 +1168,7 @@ def main():
             cmd_x = r.get("mean_cmd_lin_vel_x")
             cmd_x_str = f"{cmd_x:>8.3f}" if cmd_x is not None else f"{'n/a':>8}"
             print(f"{r['onomatopoeia']:<15} {r['mean_velocity_x']:>8.3f} {cmd_x_str} {r['mean_angular_vel_z']:>10.3f} "
-                  f"{r['mean_roll']:>8.4f} {r['mean_pitch']:>8.4f} {r['mean_text_sim']:>10.4f} {r['mean_centroid_sim']:>10.4f}")
+                  f"{r['mean_roll']:>8.4f} {r['mean_pitch']:>8.4f} {r['mean_text_sim']:>10.4f} {r['mean_teacher_motion_sim']:>10.4f}")
     
     # Close environment
     env.close()

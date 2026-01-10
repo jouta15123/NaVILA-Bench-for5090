@@ -42,7 +42,6 @@ python train_motionclip_joint.py \
   --log-interval 100 \
   --eval-interval 200 \
   --run-name freeze_sarashina_supcon \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion \
   --wandb-group freeze_stage
@@ -51,7 +50,7 @@ python train_motionclip_joint.py \
 **ポイント:**
 - `--lambda-vae 0.0`: VAE損失は無効（プロジェクタだけ学習）
 - `--lr 1e-4`: プロジェクタは比較的大きめの学習率でOK
-- `--use-aug`: データ拡張で汎化性能向上
+- データ拡張: 現在は無効（固定）
 
 ### ステージ2: Encoder（エンコーダも学習）
 
@@ -73,7 +72,6 @@ python train_motionclip_joint.py \
   --log-interval 100 \
   --eval-interval 200 \
   --run-name encoder_sarashina_supcon \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion \
   --wandb-group encoder_stage
@@ -105,7 +103,6 @@ python train_motionclip_joint.py \
   --log-interval 100 \
   --eval-interval 200 \
   --run-name full_sarashina_supcon \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion \
   --wandb-group full_stage
@@ -134,7 +131,6 @@ python train_motionclip_joint.py \
   --sem-encoder sarashina \
   --contrastive-mode supcon \
   --run-name freeze_coarse \
-  --use-aug \
   --wandb
 ```
 
@@ -150,7 +146,6 @@ python train_motionclip_joint.py \
   --lr 1e-4 \
   --sem-encoder siglip \
   --run-name freeze_siglip \
-  --use-aug \
   --wandb
 ```
 
@@ -166,7 +161,6 @@ python train_motionclip_joint.py \
   --lr 1e-4 \
   --contrastive-mode clip_ce \
   --run-name freeze_clipce \
-  --use-aug \
   --wandb
 ```
 
@@ -209,7 +203,7 @@ joint_training_results/{run_name}/checkpoints/
 
 - `--steps` を増やす
 - `--lr` を少し大きくする（ただし不安定になる可能性あり）
-- `--use-aug` を外して試す（データ拡張が学習を遅くする場合がある）
+- データ拡張は現在無効（固定）
 
 ---
 
@@ -233,7 +227,6 @@ python train_motionclip_joint.py \
   --sem-encoder sarashina \
   --contrastive-mode supcon \
   --run-name ${EXP_NAME} \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion
 
@@ -250,7 +243,6 @@ python train_motionclip_joint.py \
   --sem-encoder sarashina \
   --contrastive-mode supcon \
   --run-name ${EXP_NAME} \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion
 
@@ -268,7 +260,6 @@ python train_motionclip_joint.py \
   --sem-encoder sarashina \
   --contrastive-mode supcon \
   --run-name ${EXP_NAME} \
-  --use-aug \
   --wandb \
   --wandb-project hoyo_motion
 ```
@@ -287,4 +278,3 @@ hoyo_v1_1/joint_training_results/${EXP_NAME}/
 - **異なる `--run-name` を使う場合**: 手動でチェックポイントをコピーするか、`--run-name` を統一してください
 
 **推奨**: 実験ごとに一意の `--run-name` を使い、3ステージすべて同じ名前で実行するのが最も簡単です。
-

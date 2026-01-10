@@ -67,6 +67,8 @@ class StyleModule:
 
         # Text embedding device (default CPU to avoid GPU OOM when running RL)
         self.text_device = torch.device(os.environ.get("STYLE_TEXT_DEVICE", "cpu"))
+        # Centroid selection mode: "centroid" (default) or "random"
+        self.centroid_mode = os.environ.get("STYLE_CENTROID_MODE", "centroid").strip().lower()
         
         # Load Checkpoints
         self._load_models()
@@ -203,14 +205,20 @@ class StyleModule:
             z_all = torch.from_numpy(data["z_m"]).to(self.device)
             labels = data["labels_idx"]
             self.class_centroids = {}
+            self.class_latents = {}
             for lab_idx in np.unique(labels):
                 mask = (labels == lab_idx)
-                centroid = z_all[mask].mean(dim=0)
+                z_lab = z_all[mask]
+                # Normalize for safety (snapshot should already be normalized)
+                z_lab = F.normalize(z_lab, dim=-1)
+                centroid = z_lab.mean(dim=0)
                 self.class_centroids[int(lab_idx)] = F.normalize(centroid, dim=-1)
+                self.class_latents[int(lab_idx)] = z_lab
             self.label_list = list(data["label_list"]) if "label_list" in data else INSTRUCTION_ONOMATOPEIA
             self.label_to_id = {lab: i for i, lab in enumerate(self.label_list)}
         else:
             self.class_centroids = {}
+            self.class_latents = {}
             self.label_to_id = {}
 
     def _load_norm_stats(self):
@@ -261,6 +269,13 @@ class StyleModule:
         
         if text in self.label_to_id:
             lab_idx = self.label_to_id[text]
+            # Random sample from teacher latents if requested and available
+            if self.centroid_mode == "random" and lab_idx in self.class_latents:
+                z_lab = self.class_latents[lab_idx]
+                if z_lab.shape[0] > 0:
+                    ridx = torch.randint(0, z_lab.shape[0], (1,), device=z_lab.device)
+                    centroid = z_lab[ridx].squeeze(0).unsqueeze(0)
+                    return z_onm, centroid
             if lab_idx in self.class_centroids:
                 centroid = self.class_centroids[lab_idx].unsqueeze(0)
                 return z_onm, centroid
@@ -497,6 +512,7 @@ class StyleModule:
         self,
         apply_yaw_correction: bool = False,
         coord_mode: str | None = None,
+        centering: str | None = None,
         standardize: bool = True,
         normalize_height: bool = True,
     ) -> torch.Tensor:
@@ -512,6 +528,7 @@ class StyleModule:
         Args:
             apply_yaw_correction: Yaw補正を適用するかどうか（hoyo_frontモードのみ有効）。
             coord_mode: "legacy_xz_yaw" or "hoyo_front". If None, uses self.coord_mode.
+            centering: Centering mode for hoyo_front. "pelvis" (default) or "first_frame_com".
             standardize: Whether to apply mean/std normalization.
             normalize_height: Whether to apply height normalization (default True). Set False for raw meter visualization.
 
@@ -573,12 +590,20 @@ class StyleModule:
             return centered
 
         # Default: HOYO frontal projection
-        # 1. Per-frame Pelvis Centering (translation invariant)
-        # Pelvis = midpoint of R-Hip(8) and L-Hip(11)
-        r_hip = self.motion_buffer[:, :, 8, :]   # (B, T, 3)
-        l_hip = self.motion_buffer[:, :, 11, :]  # (B, T, 3)
-        pelvis = 0.5 * (r_hip + l_hip)           # (B, T, 3)
-        centered_3d = self.motion_buffer - pelvis[:, :, None, :]  # (B, T, 14, 3)
+        centering = centering or "pelvis"
+        if centering == "pelvis":
+            # 1. Per-frame Pelvis Centering (translation invariant)
+            # Pelvis = midpoint of R-Hip(8) and L-Hip(11)
+            r_hip = self.motion_buffer[:, :, 8, :]   # (B, T, 3)
+            l_hip = self.motion_buffer[:, :, 11, :]  # (B, T, 3)
+            pelvis = 0.5 * (r_hip + l_hip)           # (B, T, 3)
+            centered_3d = self.motion_buffer - pelvis[:, :, None, :]  # (B, T, 14, 3)
+        elif centering == "first_frame_com":
+            # 1'. First-frame CoM centering (matches HOYO first_frame_com)
+            com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            centered_3d = self.motion_buffer - com_0  # (B, T, 14, 3)
+        else:
+            raise ValueError(f"Unsupported centering mode: {centering}")
 
         # 2. (Optional) Yaw補正 - デフォルトはOFF（HOYO正規化統計に合わせる）
         if apply_yaw_correction:
@@ -682,7 +707,11 @@ class StyleModule:
         Returns:
             (B, T, 14, 2) shaped tensor in [x, y] order matching HOYO format.
         """
-        return self._prepare_centered_2d(apply_yaw_correction=False, coord_mode=self.coord_mode)
+        return self._prepare_centered_2d(
+            apply_yaw_correction=False,
+            coord_mode=self.coord_mode,
+            centering="first_frame_com",
+        )
 
     @torch.no_grad()
     def get_hoyo_compatible_keymap(self, standardize: bool = True, normalize_height: bool = True) -> torch.Tensor:
@@ -736,11 +765,14 @@ class StyleModule:
         z_m = F.normalize(out["mu"], dim=-1)
         return z_m # (B, 512)
 
-    def compute_current_reward(self, 
-                             target_z_onm: torch.Tensor, 
-                             target_centroid: torch.Tensor,
-                             beta_text: float = 0.5,
-                             beta_centroid: float = 0.5):
+    def compute_current_reward(
+        self,
+        target_z_onm: torch.Tensor,
+        target_teacher_motion: torch.Tensor,
+        beta_text: float = 0.5,
+        beta_teacher_motion: float = 0.5,
+        beta_centroid: float | None = None,
+    ):
                                  
         z_agent = self.encode_buffer() # (B, 512)
         
@@ -749,10 +781,13 @@ class StyleModule:
             # print("Warning: NaN in z_agent! Zeroing reward to prevent crash.")
             z_agent = torch.nan_to_num(z_agent, nan=0.0)
             
+        if beta_centroid is not None:
+            beta_teacher_motion = beta_centroid
+
         r_text = (z_agent * target_z_onm).sum(dim=-1)
-        r_centroid = (z_agent * target_centroid).sum(dim=-1)
+        r_teacher_motion = (z_agent * target_teacher_motion).sum(dim=-1)
         
-        reward = beta_text * r_text + beta_centroid * r_centroid
+        reward = beta_text * r_text + beta_teacher_motion * r_teacher_motion
         
         # Sanitize reward
         reward = torch.nan_to_num(reward, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -762,6 +797,6 @@ class StyleModule:
         warmup_mask = (self.warmup_counter >= self.warmup_frames).float()
         reward = reward * warmup_mask
         r_text = r_text * warmup_mask
-        r_centroid = r_centroid * warmup_mask
+        r_teacher_motion = r_teacher_motion * warmup_mask
         
-        return reward, r_text, r_centroid
+        return reward, r_text, r_teacher_motion
