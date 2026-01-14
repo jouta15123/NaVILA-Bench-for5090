@@ -90,6 +90,8 @@ from isaaclab.app import AppLauncher
 # local imports
 import cli_args  # isort: skip
 
+HOYO_UNIFIED_FPS = 50
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Evaluate style per onomatopoeia")
 parser.add_argument("--disable_fabric", action="store_true", default=False)
@@ -106,7 +108,7 @@ parser.add_argument("--eval_steps", type=int, default=1000, help="Number of step
 parser.add_argument("--output_dir", type=str, default="eval_results/style_per_onomatopoeia")
 parser.add_argument("--log_root", type=str, default=None, help="Override log root directory containing rsl_rl runs.")
 parser.add_argument("--use_log_env", action="store_true", default=True, help="Use env.yaml from the run if available.")
-parser.add_argument("--use_base_policy", action="store_true", default=False, help="Load base policy for residual actor.")
+parser.add_argument("--no_base_policy", action="store_true", default=False, help="Disable base policy loading (loaded by default for residual actor).")
 parser.add_argument(
     "--compute_hoyo_error",
     action="store_true",
@@ -125,6 +127,12 @@ parser.add_argument("--hoyo_eval_interval", type=int, default=10)
 parser.add_argument("--hoyo_metric", type=str, choices=["dtw", "l2"], default="dtw")
 parser.add_argument("--hoyo_dtw_band", type=int, default=10)
 parser.add_argument("--hoyo_seed", type=int, default=42)
+parser.add_argument(
+    "--no_hoyo_yaw_correction",
+    action="store_true",
+    default=False,
+    help="Disable yaw correction when computing HOYO error (enabled by default).",
+)
 parser.add_argument(
     "--style_list",
     type=str,
@@ -150,6 +158,38 @@ parser.add_argument(
 )
 parser.add_argument("--debug_quat", action="store_true", default=False, help="Log one quaternion to verify order.")
 parser.add_argument("--debug_dones", action="store_true", default=False, help="Log done/reset signals once.")
+parser.add_argument(
+    "--debug_hoyo_range",
+    action="store_true",
+    default=False,
+    help="Log H1/HOYO axis ranges for GIF comparison (processed input to motion encoder).",
+)
+
+# HOYO mapping visualization
+parser.add_argument(
+    "--save_hoyo_gif",
+    action="store_true",
+    default=False,
+    help="Save HOYO 2D keypoint mapping as animated GIF for each onomatopoeia.",
+)
+parser.add_argument(
+    "--save_hoyo_comparison_gif",
+    action="store_true",
+    default=False,
+    help="Save side-by-side comparison GIF (H1 vs HOYO reference).",
+)
+parser.add_argument(
+    "--hoyo_gif_fps",
+    type=int,
+    default=HOYO_UNIFIED_FPS,
+    help="FPS for HOYO GIF animation.",
+)
+parser.add_argument(
+    "--hoyo_gif_stride",
+    type=int,
+    default=2,
+    help="Frame stride for HOYO GIF (skip frames for smaller file).",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -191,6 +231,13 @@ from omni.isaac.leggedloco.config import *
 from omni.isaac.leggedloco.utils import RslRlVecEnvHistoryWrapper
 from omni.isaac.leggedloco.leggedloco.mdp.style_module import INSTRUCTION_ONOMATOPEIA
 import omni.isaac.leggedloco.leggedloco.mdp as mdp
+
+# HOYO visualization (optional)
+try:
+    from hoyo_viz_utils import save_hoyo_gif, save_hoyo_comparison_gif
+    HOYO_VIZ_AVAILABLE = True
+except ImportError:
+    HOYO_VIZ_AVAILABLE = False
 from hoyo_v1_1.models.common import HoyoInstructionDataset, apply_normalization_from_stats
 
 # List of onomatopoeia to evaluate
@@ -519,6 +566,20 @@ def compute_hoyo_error(
     return min(l2_sequence_error(seq, ref) for ref in refs)
 
 
+def _axis_range_stats(arr: np.ndarray) -> dict:
+    """Return min/max/mean for x/y axes of (T, 14, 2) array."""
+    x = arr[..., 0]
+    y = arr[..., 1]
+    return {
+        "x_min": float(np.min(x)),
+        "x_max": float(np.max(x)),
+        "x_mean": float(np.mean(x)),
+        "y_min": float(np.min(y)),
+        "y_max": float(np.max(y)),
+        "y_mean": float(np.mean(y)),
+    }
+
+
 def _set_style_for_envs(style_gen, env_ids, onomatopoeia: str, style_cache: dict | None = None) -> None:
     if style_cache is not None and onomatopoeia in style_cache:
         z_onm, teacher_motion = style_cache[onomatopoeia]
@@ -568,13 +629,20 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                           hoyo_metric: str = "dtw",
                           hoyo_eval_interval: int = 10,
                           hoyo_dtw_band: int = 10,
+                          hoyo_apply_yaw_correction: bool = True,
                           base_velocity_mode: str = "env",
                           base_cmd_default: dict | None = None,
                           style_speed_table: dict | None = None,
                           style_cache: dict | None = None,
                           debug_quat: bool = False,
-                          debug_dones: bool = False):
-    """Evaluate a single onomatopoeia and collect metrics."""
+                          debug_dones: bool = False,
+                          collect_hoyo_2d: bool = False):
+    """Evaluate a single onomatopoeia and collect metrics.
+    
+    Returns:
+        tuple: (metrics_dict, hoyo_2d_history) where hoyo_2d_history is a list of (14, 2) arrays
+               if collect_hoyo_2d=True, else None.
+    """
     
     # Force set the style command for all envs
     style_gen = env.unwrapped.command_manager._terms["style_command"]
@@ -615,7 +683,7 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         cam_eye = (robot_pos_w[0] + 3.0, robot_pos_w[1] + 3.0, robot_pos_w[2] + 2.0)
         cam_target = (robot_pos_w[0], robot_pos_w[1], robot_pos_w[2])
         base_env.sim.set_camera_view(eye=cam_eye, target=cam_target)
-        writer = imageio.get_writer(video_path, fps=50)
+        writer = imageio.get_writer(video_path, fps=HOYO_UNIFIED_FPS)
     
     # Metrics storage
     metrics = {
@@ -642,6 +710,10 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
     episode_step_counts = torch.zeros(env.unwrapped.num_envs, device=device)
     fall_count = 0
     episode_count = 0
+    
+    # HOYO 2D history for visualization (only env 0)
+    hoyo_2d_history = [] if collect_hoyo_2d else None
+    style_module = style_gen.style_module if hasattr(style_gen, "style_module") else None
     
     quat_logged = False
     done_logged = False
@@ -711,6 +783,19 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                 elif "metrics/style_centroid_sim" in extras:
                     metrics["teacher_motion_sims"].append(extras["metrics/style_centroid_sim"].item())
             
+            # Collect HOYO 2D keypoints for visualization (env 0 only)
+            if collect_hoyo_2d and style_module is not None:
+                try:
+                    # Get the 2D projection (last frame from buffer)
+                    # get_hoyo_compatible_keymap returns (B, T, 14, 2)
+                    full_buffer_2d = style_module.get_hoyo_compatible_keymap(
+                        standardize=True, normalize_height=True
+                    )
+                    latest_frame_2d = full_buffer_2d[:, -1]  # (B, 14, 2)
+                    hoyo_2d_history.append(latest_frame_2d[0].detach().cpu().numpy())
+                except Exception:
+                    pass  # Skip if buffer not ready
+            
             # Track episode lengths and falls
             episode_step_counts += 1
             if dones.any():
@@ -755,7 +840,10 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
             if teacher_cache is not None and (step % max(1, hoyo_eval_interval) == 0):
                 try:
                     # Use HOYO-compatible preprocessing (matching HOYO dataset format)
-                    buf_2d = style_gen.style_module.get_buffer_for_hoyo_comparison()
+                    buf_2d = style_gen.style_module.get_buffer_for_hoyo_comparison(
+                        apply_yaw_correction=hoyo_apply_yaw_correction,
+                        centering="first_frame_com",
+                    )
                     warm_mask = style_gen.style_module.warmup_counter >= style_gen.style_module.warmup_frames
                     buf_np = buf_2d.detach().cpu().numpy()
                     warm_np = warm_mask.detach().cpu().numpy()
@@ -823,7 +911,7 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         summary["env_velocity_x_median"] = float(np.median(vel_x_means))
         summary["env_velocity_x_iqr"] = float(np.percentile(vel_x_means, 75) - np.percentile(vel_x_means, 25))
     
-    return summary, metrics
+    return summary, metrics, hoyo_2d_history
 
 
 def save_results_to_csv(all_results, output_path, timestamp):
@@ -944,9 +1032,11 @@ def main():
     base_ckpt = getattr(agent_cfg.policy, "base_policy_checkpoint", None)
     if base_ckpt:
         agent_cfg.policy.base_policy_checkpoint = resolve_checkpoint_path(base_ckpt)
-    if not args_cli.use_base_policy:
+    if args_cli.no_base_policy:
         agent_cfg.policy.base_policy_checkpoint = None
         print("[INFO] Base policy loading disabled for evaluation.")
+    else:
+        print("[INFO] Base policy will be loaded for residual actor.")
 
     # Resolve checkpoint path early to align observation sizes
     resume_path = get_checkpoint_path(log_root_path, args_cli.load_run, agent_cfg.load_checkpoint)
@@ -969,19 +1059,53 @@ def main():
     # This avoids "valid flat patches" errors during evaluation where terrain might result in empty patches
     if hasattr(env_cfg, "events") and hasattr(env_cfg.events, "reset_base"):
         env_cfg.events.reset_base.func = mdp.reset_root_state_uniform
+        # For heading_fixed tasks, use yaw=0 to match training (robot starts facing forward)
+        # For other tasks, use random yaw
+        if "heading_fixed" in args_cli.task:
+            yaw_range = (0.0, 0.0)
+            print("[INFO] Using yaw=0 for heading_fixed task (matching training).")
+        else:
+            yaw_range = (-3.14, 3.14)
+        # Match training reset distribution (no initial velocity/rotation noise).
         env_cfg.events.reset_base.params = {
-            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": yaw_range},
             "velocity_range": {
-                "x": (-0.1, 0.1),
-                "y": (-0.1, 0.1),
-                "z": (-0.1, 0.1),
-                "roll": (-0.1, 0.1),
-                "pitch": (-0.1, 0.1),
-                "yaw": (-0.1, 0.1),
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
             },
         }
         print("[INFO] Overrode reset_base to use reset_root_state_uniform for evaluation.")
-    
+
+    # Prepare base_velocity command settings before environment creation.
+    base_cmd_default = {
+        "lin_vel_x": args_cli.base_lin_vel_x,
+        "lin_vel_y": args_cli.base_lin_vel_y,
+        "ang_vel_z": args_cli.base_ang_vel_z,
+        "heading": args_cli.base_heading,
+    }
+    effective_base_velocity_mode = args_cli.base_velocity_mode
+    if args_cli.base_velocity_mode == "fixed":
+        cmd_cfg = getattr(getattr(env_cfg, "commands", None), "base_velocity", None)
+        if cmd_cfg is not None and hasattr(cmd_cfg, "ranges"):
+            cmd_cfg.ranges.lin_vel_x = (args_cli.base_lin_vel_x, args_cli.base_lin_vel_x)
+            cmd_cfg.ranges.lin_vel_y = (args_cli.base_lin_vel_y, args_cli.base_lin_vel_y)
+            cmd_cfg.ranges.ang_vel_z = (args_cli.base_ang_vel_z, args_cli.base_ang_vel_z)
+            if hasattr(cmd_cfg.ranges, "heading"):
+                cmd_cfg.ranges.heading = (args_cli.base_heading, args_cli.base_heading)
+            # Avoid sampling "standing" commands when fixed velocity is requested.
+            if hasattr(cmd_cfg, "rel_standing_envs"):
+                cmd_cfg.rel_standing_envs = 0.0
+            # Prevent resampling from changing the fixed command.
+            cmd_cfg.resampling_time_range = (1.0e6, 1.0e6)
+            effective_base_velocity_mode = "env"
+            print("[INFO] base_velocity_mode=fixed -> using command generator with constant ranges.")
+        else:
+            print("[WARN] base_velocity_mode=fixed requested but env_cfg.commands.base_velocity not found.")
+
     # Create environment - always use rgb_array for video recording
     seed_everything(args_cli.seed)
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
@@ -998,6 +1122,23 @@ def main():
     # parameters are frozen/absent in the checkpoint.
     ppo_runner.load(resume_path, load_optimizer=False)
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+    
+    # Verify base policy is loaded for ResidualActorCritic
+    actor_critic = ppo_runner.alg.actor_critic
+    if hasattr(actor_critic, "base_policy"):
+        if actor_critic.base_policy is None:
+            if args_cli.no_base_policy:
+                print("[WARN] Running without base policy (--no_base_policy specified).")
+                print("[WARN] ResidualActorCritic without base policy will likely fail to walk!")
+            else:
+                raise RuntimeError(
+                    "ResidualActorCritic requires base_policy but it is None!\n"
+                    "This means the base policy checkpoint failed to load or was disabled.\n"
+                    "Check the base_policy_checkpoint path in agent config.\n"
+                    "If you intentionally want to run without base policy, use --no_base_policy."
+                )
+        else:
+            print("[INFO] Base policy is loaded and ready for evaluation.")
     
     # Get inference policy
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
@@ -1018,6 +1159,7 @@ def main():
         compute_hoyo_error = False
     elif args_cli.compute_hoyo_error:
         compute_hoyo_error = True
+    hoyo_apply_yaw_correction = not args_cli.no_hoyo_yaw_correction
     if compute_hoyo_error:
         try:
             hoyo_root = Path(args_cli.hoyo_root) if args_cli.hoyo_root else (Path(NAVILA_ROOT) / "hoyo_v1_1")
@@ -1065,12 +1207,6 @@ def main():
     # Evaluate each onomatopoeia
     all_results = []
     interrupted = False
-    base_cmd_default = {
-        "lin_vel_x": args_cli.base_lin_vel_x,
-        "lin_vel_y": args_cli.base_lin_vel_y,
-        "ang_vel_z": args_cli.base_ang_vel_z,
-        "heading": args_cli.base_heading,
-    }
     style_speed_table = load_style_speed_table(args_cli.style_speed_table, base_cmd_default)
 
     print("\n" + "="*60)
@@ -1079,12 +1215,13 @@ def main():
     print(f"[INFO] Evaluating {len(styles_to_eval)} styles: {styles_to_eval}")
     if compute_hoyo_error:
         print("[INFO] HOYO error computation: enabled")
+        print(f"[INFO] HOYO yaw correction: {'enabled' if hoyo_apply_yaw_correction else 'disabled'}")
     else:
         print("[INFO] HOYO error computation: disabled")
-    if args_cli.base_velocity_mode != "env":
-        print(f"[INFO] base_velocity_mode={args_cli.base_velocity_mode}")
+    if effective_base_velocity_mode != "env":
+        print(f"[INFO] base_velocity_mode={effective_base_velocity_mode}")
         print(f"[INFO] base_velocity_default={base_cmd_default}")
-        if args_cli.base_velocity_mode == "style_table":
+        if effective_base_velocity_mode == "style_table":
             print(f"[INFO] style_speed_table entries={len(style_speed_table)}")
     
     try:
@@ -1098,7 +1235,7 @@ def main():
                 safe_name = onomatopoeia.replace("/", "_").replace("\\", "_")
                 video_path = str(video_dir / f"{timestamp}_{safe_name}.mp4")
             
-            summary, raw_metrics = evaluate_onomatopoeia(
+            summary, raw_metrics, hoyo_2d_history = evaluate_onomatopoeia(
                 env, policy, onomatopoeia, 
                 num_steps=args_cli.eval_steps if not args_cli.video else args_cli.video_length,
                 device=env.unwrapped.device,
@@ -1108,13 +1245,69 @@ def main():
                 hoyo_metric=args_cli.hoyo_metric,
                 hoyo_eval_interval=args_cli.hoyo_eval_interval,
                 hoyo_dtw_band=args_cli.hoyo_dtw_band,
-                base_velocity_mode=args_cli.base_velocity_mode,
+                hoyo_apply_yaw_correction=hoyo_apply_yaw_correction,
+                base_velocity_mode=effective_base_velocity_mode,
                 base_cmd_default=base_cmd_default,
                 style_speed_table=style_speed_table,
                 style_cache=style_cache,
                 debug_quat=args_cli.debug_quat,
                 debug_dones=args_cli.debug_dones,
+                collect_hoyo_2d=args_cli.save_hoyo_gif or args_cli.save_hoyo_comparison_gif,
             )
+            
+            # Save HOYO GIF if requested
+            if args_cli.save_hoyo_gif and hoyo_2d_history and HOYO_VIZ_AVAILABLE:
+                safe_name = onomatopoeia.replace("/", "_").replace("\\", "_")
+                hoyo_gif_dir = output_dir / "hoyo_gifs"
+                hoyo_gif_dir.mkdir(exist_ok=True)
+                hoyo_gif_path = str(hoyo_gif_dir / f"{timestamp}_{safe_name}_hoyo.gif")
+                save_hoyo_gif(
+                    hoyo_2d_history,
+                    hoyo_gif_path,
+                    fps=args_cli.hoyo_gif_fps,
+                    stride=args_cli.hoyo_gif_stride,
+                    title=f"H1 → HOYO: {onomatopoeia}",
+                )
+                if args_cli.debug_hoyo_range:
+                    h1_arr = np.stack(hoyo_2d_history, axis=0)
+                    stats = _axis_range_stats(h1_arr)
+                    print(
+                        "[DEBUG] H1 axis range (processed): "
+                        f"x[{stats['x_min']:.3f}, {stats['x_max']:.3f}] "
+                        f"y[{stats['y_min']:.3f}, {stats['y_max']:.3f}] "
+                        f"mean(x,y)=({stats['x_mean']:.3f}, {stats['y_mean']:.3f})"
+                    )
+            
+            # Save comparison GIF (H1 vs HOYO reference)
+            if args_cli.save_hoyo_comparison_gif and hoyo_2d_history and HOYO_VIZ_AVAILABLE:
+                if teacher_cache is not None and onomatopoeia in teacher_cache:
+                    hoyo_refs = teacher_cache[onomatopoeia]
+                    if hoyo_refs:
+                        # Use the first reference sample for comparison
+                        hoyo_ref_sample = hoyo_refs[0]  # (T, 14, 2)
+                        if args_cli.debug_hoyo_range:
+                            stats = _axis_range_stats(hoyo_ref_sample)
+                            print(
+                                "[DEBUG] HOYO axis range (processed): "
+                                f"x[{stats['x_min']:.3f}, {stats['x_max']:.3f}] "
+                                f"y[{stats['y_min']:.3f}, {stats['y_max']:.3f}] "
+                                f"mean(x,y)=({stats['x_mean']:.3f}, {stats['y_mean']:.3f})"
+                            )
+                        safe_name = onomatopoeia.replace("/", "_").replace("\\", "_")
+                        comparison_gif_dir = output_dir / "hoyo_comparison_gifs"
+                        comparison_gif_dir.mkdir(exist_ok=True)
+                        comparison_gif_path = str(comparison_gif_dir / f"{timestamp}_{safe_name}_comparison.gif")
+                        save_hoyo_comparison_gif(
+                            hoyo_2d_history,
+                            hoyo_ref_sample,
+                            comparison_gif_path,
+                            fps=args_cli.hoyo_gif_fps,
+                            stride=args_cli.hoyo_gif_stride,
+                            title=f"{onomatopoeia}: H1 vs HOYO Reference",
+                            loop_hoyo=True,
+                        )
+                else:
+                    print(f"  [WARN] No HOYO reference for {onomatopoeia}. Skipping comparison GIF.")
             
             all_results.append(summary)
             

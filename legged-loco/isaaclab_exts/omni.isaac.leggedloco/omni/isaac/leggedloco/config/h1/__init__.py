@@ -5,6 +5,7 @@ from .h1_low_vision_cfg import (
     H1VisionRoughEnvCfg,
     H1VisionRoughEnvCfg_Legacy,
     H1VisionRoughEnvCfg_HeadingFixed,
+    H1VisionRoughEnvCfg_HeadingFixed_ExpA,
     H1VisionRoughEnvCfg_PLAY,
     H1VisionRoughPPORunnerCfg,
 )
@@ -62,6 +63,16 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": H1VisionRoughEnvCfg_HeadingFixed,
+        "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg,
+    },
+)
+
+gym.register(
+    id="h1_vision_heading_fixed_exp_a",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": H1VisionRoughEnvCfg_HeadingFixed_ExpA,
         "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg,
     },
 )

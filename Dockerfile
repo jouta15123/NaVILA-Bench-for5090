@@ -32,7 +32,8 @@ RUN /workspace/IsaacLab/isaaclab.sh -i none \
 # setup torch for cu128 and install gym
 RUN /isaac-sim/python.sh -m pip uninstall -y torch torchvision torchaudio \
  && /isaac-sim/python.sh -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio \
- && /isaac-sim/python.sh -m pip install numpy==1.26.4 opencv-python==4.11.0.86 gym rl-games stable_baselines3 tensordict
+ && /isaac-sim/python.sh -m pip install numpy==1.26.4 opencv-python==4.11.0.86 gym rl-games stable_baselines3 tensordict \
+ && /isaac-sim/python.sh -m pip install sentence-transformers sentencepiece
 # create assets directory to mount usds
 RUN mkdir /workspace/NaVILA-Bench/isaaclab_exts/omni.isaac.vlnce/assets
 # enable WebRTC
@@ -40,6 +41,9 @@ ENV LIVESTREAM=2
 # create conda environment for NaVILA
 RUN conda create -n navila-eval -y python=3.10 pip setuptools wheel \
  && conda clean -afy
+# avoid git safe.directory warnings inside the container
+RUN git config --global --add safe.directory /workspace/NaVILA-Bench/legged-loco \
+ && git config --global --add safe.directory /workspace/NaVILA-Bench
 # set for start
 WORKDIR /workspace/NaVILA-Bench
 ENTRYPOINT ["/bin/bash"]

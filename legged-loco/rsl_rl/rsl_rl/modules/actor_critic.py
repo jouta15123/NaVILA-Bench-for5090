@@ -201,8 +201,11 @@ class ResidualActorCritic(ActorCritic):
                 else:
                     print("Base Policy Loaded.")
             except Exception as e:
-                print(f"Failed to load base policy: {e}")
-                self.base_policy = None
+                raise RuntimeError(
+                    f"Failed to load base policy from {base_policy_checkpoint}: {e}\n"
+                    "ResidualActorCritic requires a valid base policy checkpoint. "
+                    "Check that the file exists and has the correct format."
+                )
             
             # Freeze base policy
             if self.base_policy is not None:

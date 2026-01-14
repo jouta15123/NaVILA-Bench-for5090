@@ -578,6 +578,25 @@ class H1VisionRoughEnvCfg_HeadingFixed(H1VisionRoughEnvCfg):
 
 
 @configclass
+class H1VisionRoughEnvCfg_HeadingFixed_ExpA(H1VisionRoughEnvCfg_HeadingFixed):
+    """実験A: 報酬バランス調整（マイルド版）
+    
+    変更点:
+    - style_tracking: 5.0 → 2.0 (スタイル追従を緩める)
+    - flat_orientation_l2: -0.2 → -0.5 (姿勢ペナルティを強める)
+    
+    期待: 姿勢崩れ（右肩低下）が改善される
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+        
+        # === 実験A: 報酬バランス調整 ===
+        self.rewards.style_tracking.weight = 2.0      # 5.0 → 2.0
+        self.rewards.flat_orientation_l2.weight = -0.5  # -0.2 → -0.5
+
+
+@configclass
 class H1VisionRoughEnvCfg_PLAY(H1VisionRoughEnvCfg):
     def __post_init__(self):
         # post init of parent

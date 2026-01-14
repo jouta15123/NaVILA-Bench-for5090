@@ -538,8 +538,16 @@ class StyleModule:
         coord_mode = coord_mode or self.coord_mode
         if coord_mode == "legacy_xz_yaw":
             # Legacy: XZ sagittal projection with yaw correction (pre-2025-12-16 behavior)
-            # 1. Frame 0のCoMでセンタリング
-            com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            # 1. Frame 0のCoMでセンタリング（バッファ未充足時は最初の有効フレームを使う）
+            if hasattr(self, "warmup_counter"):
+                B, T = self.motion_buffer.shape[0], self.motion_buffer.shape[1]
+                valid_len = torch.clamp(self.warmup_counter, min=1, max=T).long()  # (B,)
+                idx0 = (T - valid_len).clamp(min=0, max=T - 1)  # (B,)
+                batch_idx = torch.arange(B, device=self.motion_buffer.device)
+                frame0 = self.motion_buffer[batch_idx, idx0]  # (B, 14, 3)
+                com_0 = frame0.mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            else:
+                com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
             centered_3d = self.motion_buffer - com_0
 
             # 2. Align rotation by -Yaw of frame 0 (legacy)
@@ -573,7 +581,8 @@ class StyleModule:
                 scale = scale.view(-1, 1)
             else:
                 scale = heights.mean(dim=1, keepdim=True)  # (B, 1)
-            scale = torch.maximum(scale, torch.tensor(1.0, device=self.device))
+            # Match HOYO behavior: only guard against near-zero scale
+            scale = torch.where(scale < 1e-6, torch.ones_like(scale), scale)
             scale_bc = scale.view(-1, 1, 1, 1)
             centered = centered / scale_bc
 
@@ -590,7 +599,10 @@ class StyleModule:
             return centered
 
         # Default: HOYO frontal projection
-        centering = centering or "pelvis"
+        centering = centering or "first_frame_com"
+        # Per-frame COM (HOYO-style) for scale computation only
+        com_pf = self.motion_buffer.mean(dim=2, keepdim=True)  # (B, T, 1, 3)
+        centered_3d_scale = self.motion_buffer - com_pf
         if centering == "pelvis":
             # 1. Per-frame Pelvis Centering (translation invariant)
             # Pelvis = midpoint of R-Hip(8) and L-Hip(11)
@@ -600,7 +612,16 @@ class StyleModule:
             centered_3d = self.motion_buffer - pelvis[:, :, None, :]  # (B, T, 14, 3)
         elif centering == "first_frame_com":
             # 1'. First-frame CoM centering (matches HOYO first_frame_com)
-            com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            # バッファ未充足時は最初の有効フレームを基準にする（ゼロ初期化の影響を避ける）
+            if hasattr(self, "warmup_counter"):
+                B, T = self.motion_buffer.shape[0], self.motion_buffer.shape[1]
+                valid_len = torch.clamp(self.warmup_counter, min=1, max=T).long()  # (B,)
+                idx0 = (T - valid_len).clamp(min=0, max=T - 1)  # (B,)
+                batch_idx = torch.arange(B, device=self.motion_buffer.device)
+                frame0 = self.motion_buffer[batch_idx, idx0]  # (B, 14, 3)
+                com_0 = frame0.mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
+            else:
+                com_0 = self.motion_buffer[:, 0].mean(dim=1, keepdim=True).unsqueeze(1)  # (B, 1, 1, 3)
             centered_3d = self.motion_buffer - com_0  # (B, T, 14, 3)
         else:
             raise ValueError(f"Unsupported centering mode: {centering}")
@@ -621,6 +642,14 @@ class StyleModule:
             y_rot = x * s + y * c
             centered_3d = torch.cat([x_rot, y_rot, z], dim=-1)
 
+            # Apply the same yaw correction to scale-computation frames
+            x_s = centered_3d_scale[..., 0:1]
+            y_s = centered_3d_scale[..., 1:2]
+            z_s = centered_3d_scale[..., 2:3]
+            x_s_rot = x_s * c - y_s * s
+            y_s_rot = x_s * s + y_s * c
+            centered_3d_scale = torch.cat([x_s_rot, y_s_rot, z_s], dim=-1)
+
         # 3. 3D→2D投影: H1[Y(左右), Z(上下)] → HOYO正面視点 [x, y]
         # HOYO座標系（画像座標系、frontビュー、swap後）:
         #   - HOYO x: 被写体の左が正（画像の水平方向）
@@ -635,11 +664,15 @@ class StyleModule:
         z_up = centered_3d[..., 2:3]   # H1 Z: 上向き正
         centered = torch.cat([y_lat, -z_up], dim=-1)
 
-        # 4. 身長正規化（Fixed Scale with EMA + healthy guard）
+        y_lat_s = centered_3d_scale[..., 1:2]
+        z_up_s = centered_3d_scale[..., 2:3]
+        centered_scale = torch.cat([y_lat_s, -z_up_s], dim=-1)
+
+        # 4. 身長正規化（HOYOと同じ: head-feet 平均スケール）
         if normalize_height:
-            head_pos = centered[:, :, 0, :]   # (B, T, 2) - head
-            r_ankle = centered[:, :, 10, :]   # (B, T, 2) - right ankle
-            l_ankle = centered[:, :, 13, :]   # (B, T, 2) - left ankle
+            head_pos = centered_scale[:, :, 0, :]   # (B, T, 2) - head
+            r_ankle = centered_scale[:, :, 10, :]   # (B, T, 2) - right ankle
+            l_ankle = centered_scale[:, :, 13, :]   # (B, T, 2) - left ankle
             feet_mid = 0.5 * (r_ankle + l_ankle)
 
             # Current height per env (mean over valid frames)
@@ -649,32 +682,11 @@ class StyleModule:
                 valid_len = torch.clamp(self.warmup_counter, min=1, max=T).view(-1, 1)
                 t_idx = torch.arange(T, device=heights.device).view(1, T)
                 mask = (t_idx >= (T - valid_len)).float()
-                curr_scale = (heights * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+                scale = (heights * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
             else:
-                curr_scale = heights.mean(dim=1)  # (B,)
-            curr_scale = curr_scale.clamp(self.scale_min, self.scale_max)
-
-            # Identify envs needing init vs update
-            need_init = torch.isnan(self.scale_ref)
-            # Healthy = standing (head-feet dist > threshold)
-            healthy = (curr_scale > self.scale_healthy_threshold)
-            # Only update scale_ref after buffer is fully populated
-            full_buf = (self.warmup_counter >= self.warmup_frames)
-
-            # Initialize: only healthy envs
-            init_mask = need_init & healthy & full_buf
-            self.scale_ref[init_mask] = curr_scale[init_mask]
-
-            # EMA update: initialized & healthy envs only
-            upd_mask = (~need_init) & healthy & full_buf
-            self.scale_ref[upd_mask] = (
-                self.scale_ema * self.scale_ref[upd_mask]
-                + (1.0 - self.scale_ema) * curr_scale[upd_mask]
-            )
-
-            # Use scale_ref for normalization (fallback to curr_scale if still nan)
-            scale = torch.where(torch.isnan(self.scale_ref), curr_scale, self.scale_ref)
-            scale = torch.maximum(scale, torch.tensor(self.scale_min, device=self.device))
+                scale = heights.mean(dim=1)  # (B,)
+            # Match HOYO behavior: only guard against near-zero scale
+            scale = torch.where(scale < 1e-6, torch.ones_like(scale), scale)
             scale_bc = scale.view(-1, 1, 1, 1)
             centered = centered / scale_bc
 
@@ -698,19 +710,36 @@ class StyleModule:
         return self._prepare_centered_2d(coord_mode=self.coord_mode)
 
     @torch.no_grad()
-    def get_buffer_for_hoyo_comparison(self) -> torch.Tensor:
+    def get_buffer_for_hoyo_comparison(
+        self,
+        apply_yaw_correction: bool = False,
+        coord_mode: str | None = None,
+        centering: str = "first_frame_com",
+        standardize: bool = True,
+        normalize_height: bool = True,
+    ) -> torch.Tensor:
         """
         HOYO誤差計算用に、HOYOデータセットと同じ前処理を適用したバッファを返す。
 
-        _prepare_centered_2d()と同一の処理を使用し、座標系の一貫性を保証する。
+        回転の影響を除外したい場合は apply_yaw_correction を有効にする。
+
+        Args:
+            apply_yaw_correction: Yaw補正を適用するかどうか。
+            coord_mode: "legacy_xz_yaw" or "hoyo_front". Noneならself.coord_mode。
+            centering: HOYOのセンタリング方式（例: "first_frame_com"）。
+            standardize: mean/std 正規化を適用するか。
+            normalize_height: 身長正規化を適用するか。
 
         Returns:
             (B, T, 14, 2) shaped tensor in [x, y] order matching HOYO format.
         """
+        coord_mode = coord_mode or self.coord_mode
         return self._prepare_centered_2d(
-            apply_yaw_correction=False,
-            coord_mode=self.coord_mode,
-            centering="first_frame_com",
+            apply_yaw_correction=apply_yaw_correction,
+            coord_mode=coord_mode,
+            centering=centering,
+            standardize=standardize,
+            normalize_height=normalize_height,
         )
 
     @torch.no_grad()
