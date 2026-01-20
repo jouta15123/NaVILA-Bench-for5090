@@ -75,6 +75,88 @@ STYLE_CENTROID_MODE=random \
   --style_beta_teacher_motion 1.0
 ```
 
+### 速度コマンド固定: `h1_vision_without_speedinput`
+
+目的:
+- 速度コマンドを固定し、スタイル主導の速度変化を観察
+- heading/速度追従報酬を抑えた設定
+
+```bash
+WANDB_ENTITY=jouta15123-osaka-univercity \
+STYLE_RUN_NAME=20260109_optuna_trial1_full \
+STYLE_CENTROID_MODE=random \
+/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/train.py \
+  --task h1_vision_without_speedinput \
+  --num_envs 2048 \
+  --max_iterations 3000 \
+  --save_interval 200 \
+  --history_length 9 \
+  --run_name <RUN_NAME> \
+  --terrain flat \
+  --headless \
+  --logger wandb \
+  --log_project_name StyleWalker_RL_fixed \
+  --experiment_name <EXPERIMENT_NAME> \
+  --style_beta_text 0.0 \
+  --style_beta_teacher_motion 1.0
+```
+
+### 実験B: 速度追従強化 `h1_vision_without_speedinput_exp_b`（2026-01-18）
+
+報酬設定:
+- `track_lin_vel_xy_exp`: 0.5（0.1 → 0.5）
+- `style_tracking`: 2.0
+- `flat_orientation_l2`: -0.5
+- `heading_tracking`: 0.2
+
+コマンド:
+```bash
+WANDB_ENTITY=jouta15123-osaka-univercity \
+STYLE_RUN_NAME=20260109_optuna_trial1_full \
+STYLE_CENTROID_MODE=random \
+/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/train.py \
+  --task h1_vision_without_speedinput_exp_b \
+  --num_envs 2048 \
+  --max_iterations 3000 \
+  --save_interval 200 \
+  --history_length 9 \
+  --run_name exp_b_track05 \
+  --terrain flat \
+  --headless \
+  --logger wandb \
+  --log_project_name StyleWalker_RL_fixed \
+  --experiment_name style_exp_b \
+  --style_beta_text 0.0 \
+  --style_beta_teacher_motion 1.0
+```
+
+### 実験B-0.5固定: 速度コマンド固定 `h1_vision_without_speedinput_exp_b_fixed05`（2026-01-19）
+
+変更点:
+- base_velocity: lin_vel_x = 0.5 固定
+- 報酬設定は ExpB と同じ
+
+コマンド:
+```bash
+WANDB_ENTITY=jouta15123-osaka-univercity \
+STYLE_RUN_NAME=20260109_optuna_trial1_full \
+STYLE_CENTROID_MODE=random \
+/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/train.py \
+  --task h1_vision_without_speedinput_exp_b_fixed05 \
+  --num_envs 2048 \
+  --max_iterations 3000 \
+  --save_interval 200 \
+  --history_length 9 \
+  --run_name exp_b_cmd05 \
+  --terrain flat \
+  --headless \
+  --logger wandb \
+  --log_project_name StyleWalker_RL_fixed \
+  --experiment_name style_exp_b \
+  --style_beta_text 0.0 \
+  --style_beta_teacher_motion 1.0
+```
+
 ### 訓練オプション一覧
 
 | オプション | 説明 | デフォルト |
@@ -261,6 +343,9 @@ STYLE_CENTROID_MODE=random \
 |----------|------|----------------|---------------------|
 | `h1_vision_heading_fixed` | 基本設定 | 5.0 | -0.2 |
 | `h1_vision_heading_fixed_exp_a` | 姿勢ペナルティ強化 | 2.0 | -0.5 |
+| `h1_vision_without_speedinput` | 速度コマンド固定 + heading抑制 | 2.0 | -0.5 |
+| `h1_vision_without_speedinput_exp_b` | 速度コマンド固定 + 速度追従強化 | 2.0 | -0.5 |
+| `h1_vision_without_speedinput_exp_b_fixed05` | 速度コマンド0.5固定 + 速度追従強化 | 2.0 | -0.5 |
 
 タスク設定ファイル: `legged-loco/isaaclab_exts/omni.isaac.leggedloco/omni/isaac/leggedloco/config/h1/h1_low_vision_cfg.py`
 

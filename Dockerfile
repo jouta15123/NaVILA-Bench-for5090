@@ -33,7 +33,8 @@ RUN /workspace/IsaacLab/isaaclab.sh -i none \
 RUN /isaac-sim/python.sh -m pip uninstall -y torch torchvision torchaudio \
  && /isaac-sim/python.sh -m pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio \
  && /isaac-sim/python.sh -m pip install numpy==1.26.4 opencv-python==4.11.0.86 gym rl-games stable_baselines3 tensordict \
- && /isaac-sim/python.sh -m pip install sentence-transformers sentencepiece
+ && /isaac-sim/python.sh -m pip install sentence-transformers sentencepiece \
+ && /workspace/IsaacLab/isaaclab.sh -p -m pip install -U "wandb>=0.22.3"
 # create assets directory to mount usds
 RUN mkdir /workspace/NaVILA-Bench/isaaclab_exts/omni.isaac.vlnce/assets
 # enable WebRTC

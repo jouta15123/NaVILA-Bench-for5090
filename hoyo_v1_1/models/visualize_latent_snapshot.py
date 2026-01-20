@@ -45,6 +45,11 @@ def main():
             "- 'coarse': 11オノマトペを 4 スタイル群（速い系/遅い系/重い系/ふらふら系）にまとめて表示。"
         ),
     )
+    parser.add_argument(
+        "--no-prototypes",
+        action="store_true",
+        help="Disable plotting semantic prototypes (stars).",
+    )
     args = parser.parse_args()
 
     snapshot_path = Path(args.snapshot)
@@ -149,17 +154,18 @@ def main():
                 label=f"{lab} ({split_name})",
             )
 
-    # Plot semantic prototypes as large stars
-    plt.scatter(
-        z_s_2d[:, 0],
-        z_s_2d[:, 1],
-        s=120,
-        marker="*",
-        edgecolors="k",
-        facecolors="none",
-        linewidths=1.0,
-        label="sem prototypes",
-    )
+    if not args.no_prototypes:
+        # Plot semantic prototypes as large stars
+        plt.scatter(
+            z_s_2d[:, 0],
+            z_s_2d[:, 1],
+            s=120,
+            marker="*",
+            edgecolors="k",
+            facecolors="none",
+            linewidths=1.0,
+            label="sem prototypes",
+        )
 
     plt.title("Motion / Semantic Latent Space (PCA 2D)")
     plt.xlabel("PC1")
@@ -175,5 +181,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 

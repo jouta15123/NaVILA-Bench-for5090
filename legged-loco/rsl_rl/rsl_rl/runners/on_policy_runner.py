@@ -13,7 +13,7 @@ from torch.utils.tensorboard import SummaryWriter as TensorboardSummaryWriter
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCriticDepthCNN, ActorCriticDepthCNNRecurrent, EmpiricalNormalization
+from rsl_rl.modules import ActorCritic, ActorCriticWithBaseInit, ActorCriticRecurrent, ActorCriticDepthCNN, ActorCriticDepthCNNRecurrent, EmpiricalNormalization
 from rsl_rl.utils import store_code_state
 
 

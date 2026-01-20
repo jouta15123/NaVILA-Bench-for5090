@@ -48,6 +48,14 @@ class CustomPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     residual_scale: float = 0.1
     unfreeze_base_last_layer: bool = False
 
+
+@configclass
+class CustomPpoActorCriticFullFTCfg(RslRlPpoActorCriticCfg):
+    """ActorCritic full fine-tune (base init only)."""
+
+    base_policy_checkpoint: str = None
+    style_dim: int = 512
+
 @configclass
 class H1VisionRoughPPORunnerCfg(H1RoughPPORunnerCfg):
     experiment_name = "h1_vision_rough"
@@ -67,6 +75,26 @@ class H1VisionRoughPPORunnerCfg(H1RoughPPORunnerCfg):
         style_dim=512,
         residual_scale=0.3,  # Increased from 0.1 to allow more style influence
         unfreeze_base_last_layer=True,
+    )
+
+
+@configclass
+class H1VisionRoughPPORunnerCfg_FullFT(H1RoughPPORunnerCfg):
+    """Full fine-tune with plain ActorCritic (initialized from base checkpoint)."""
+
+    experiment_name = "h1_vision_rough_fullft"
+    logger = "wandb"
+    wandb_project = "StyleWalker_RL"
+    wandb_tags = ["staged"]
+
+    policy = CustomPpoActorCriticFullFTCfg(
+        init_noise_std=1.0,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+        class_name="ActorCriticWithBaseInit",
+        base_policy_checkpoint="/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2024-11-03_15-08-09_height_scan_obst/model_4999_pad877_256.pt",
+        style_dim=512,
     )
 
 
@@ -594,6 +622,58 @@ class H1VisionRoughEnvCfg_HeadingFixed_ExpA(H1VisionRoughEnvCfg_HeadingFixed):
         # === 実験A: 報酬バランス調整 ===
         self.rewards.style_tracking.weight = 2.0      # 5.0 → 2.0
         self.rewards.flat_orientation_l2.weight = -0.5  # -0.2 → -0.5
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput(H1VisionRoughEnvCfg_HeadingFixed_ExpA):
+    """速度コマンドを固定し、スタイル主導の速度変化を観察する構成。
+
+    - base_velocity: 常に固定値（観測次元は維持）
+    - heading報酬と速度追従報酬を抑える
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Keep a tiny forward command to avoid standing-in-place collapse.
+        self.commands.base_velocity.ranges.lin_vel_x = (0.1, 0.1)
+        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
+        self.commands.base_velocity.ranges.ang_vel_z = (0.0, 0.0)
+        if hasattr(self.commands.base_velocity.ranges, "heading"):
+            self.commands.base_velocity.ranges.heading = (0.0, 0.0)
+        self.commands.base_velocity.rel_standing_envs = 0.0
+        self.commands.base_velocity.resampling_time_range = (1.0e6, 1.0e6)
+
+        if self.rewards.track_lin_vel_xy_exp is not None:
+            self.rewards.track_lin_vel_xy_exp.weight = 0.1
+        if self.rewards.heading_tracking is not None:
+            self.rewards.heading_tracking.weight = 0.2
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB(H1VisionRoughEnvCfg_WithoutSpeedInput):
+    """実験B: 速度追従を強める（track 0.1 → 0.5）
+
+    - base_velocity: 常に固定値（lin_vel_x=0.1）
+    - style/flat/heading は ExpA と同じ
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # === 実験B: 速度追従を強化 ===
+        if self.rewards.track_lin_vel_xy_exp is not None:
+            # self.rewards.track_lin_vel_xy_exp.weight = 0.1  # previous (run-20260114_134727-u5zkafwv)
+            self.rewards.track_lin_vel_xy_exp.weight = 0.5
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB_Fixed05(H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB):
+    """実験B: 速度コマンドを 0.5 固定にしたバリエーション。"""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.base_velocity.ranges.lin_vel_x = (0.5, 0.5)
 
 
 @configclass

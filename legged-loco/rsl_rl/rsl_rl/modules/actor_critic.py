@@ -116,6 +116,68 @@ class ActorCritic(nn.Module):
         return value
 
 
+class ActorCriticWithBaseInit(ActorCritic):
+    """ActorCritic initialized from a base policy checkpoint (full fine-tune).
+
+    This loads actor/critic weights from a base checkpoint. If the current
+    observation dimension is larger (e.g., style appended), the first layer
+    weights are padded with zeros for the extra dimensions.
+    """
+
+    def __init__(
+        self,
+        num_actor_obs,
+        num_critic_obs,
+        num_actions,
+        base_policy_checkpoint=None,
+        style_dim=0,
+        **kwargs,
+    ):
+        self.base_policy_checkpoint = base_policy_checkpoint
+        self.style_dim = style_dim
+        super().__init__(num_actor_obs, num_critic_obs, num_actions, **kwargs)
+
+        if base_policy_checkpoint is not None and len(base_policy_checkpoint) > 0:
+            self._load_base_policy(base_policy_checkpoint)
+
+    def _load_base_policy(self, checkpoint_path: str) -> None:
+        print(f"Loading Base Policy (full FT init) from {checkpoint_path}...")
+        try:
+            loaded_dict = torch.load(checkpoint_path, map_location="cpu")
+            state_dict = loaded_dict.get("model_state_dict", loaded_dict)
+        except Exception as e:
+            print(f"[WARN] Failed to load base policy checkpoint: {e}")
+            return
+
+        # Load actor/critic weights only (avoid critic mismatch if shapes differ).
+        base_state = {
+            k: v
+            for k, v in state_dict.items()
+            if k.startswith("actor.") or k.startswith("critic.") or k in ("std", "log_std")
+        }
+
+        new_state = self.state_dict()
+        for k, v in base_state.items():
+            if k not in new_state:
+                continue
+            target = new_state[k]
+            if k in ("actor.0.weight", "critic.0.weight") and v.ndim == 2 and target.ndim == 2:
+                if v.shape[0] == target.shape[0] and v.shape[1] <= target.shape[1]:
+                    padded = target.clone()
+                    padded.zero_()
+                    padded[:, : v.shape[1]] = v
+                    new_state[k] = padded
+                else:
+                    print(f"[WARN] Skip init for {k}: base {v.shape} vs target {target.shape}")
+            elif v.shape == target.shape:
+                new_state[k] = v
+            else:
+                print(f"[WARN] Skip init for {k}: base {v.shape} vs target {target.shape}")
+
+        self.load_state_dict(new_state, strict=False)
+        print("Base Policy initialization done.")
+
+
 def get_activation(act_name):
     if act_name == "elu":
         return nn.ELU()
