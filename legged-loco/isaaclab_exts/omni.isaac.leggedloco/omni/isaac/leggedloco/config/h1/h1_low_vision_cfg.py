@@ -414,7 +414,7 @@ class CustomH1Rewards(H1Rewards):
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=3.0,  # Increased from 1.0 to balance with velocity tracking
-        params={"command_name": "style_command", "beta_text": 0.5, "beta_teacher_motion": 0.5, "ramp_steps": 5000},
+        params={"command_name": "style_command", "beta_text": 0.0, "beta_teacher_motion": 1.0, "ramp_steps": 5000},
     )
 ##
 # Commands
@@ -674,6 +674,28 @@ class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB_Fixed05(H1VisionRoughEnvCfg_Wit
     def __post_init__(self):
         super().__post_init__()
         self.commands.base_velocity.ranges.lin_vel_x = (0.5, 0.5)
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03(H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB):
+    """実験C: 速度 0.3 固定 + 安定性寄りの報酬バランス。
+
+    目的:
+    - 速度0.1固定で「走りだす」挙動を抑えつつ、スタイル差を出しやすい中速(0.3)で学習/評価する
+    - 速度0.5固定で発生した姿勢崩れを抑える方向に寄せる（flat_orientation強化、feet_air_time緩和）
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # === 速度コマンドを 0.3 固定 ===
+        self.commands.base_velocity.ranges.lin_vel_x = (0.3, 0.3)
+
+        # === 安定化（姿勢・歩容） ===
+        # flat_orientation は IsaacLab のデフォルト H1RoughEnvCfg でも -1.0。
+        self.rewards.flat_orientation_l2.weight = -1.0
+        # feet_air_time を上げすぎると低速でも足上げが過剰になりやすいので、まずは基準値へ戻す。
+        self.rewards.feet_air_time.weight = 0.25
 
 
 @configclass

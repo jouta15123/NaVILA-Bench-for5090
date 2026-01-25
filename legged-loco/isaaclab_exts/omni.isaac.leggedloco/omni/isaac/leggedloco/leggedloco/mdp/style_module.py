@@ -197,6 +197,14 @@ class StyleModule:
         except Exception as e:
             print(f"Warning: Failed to precompute text latents: {e}")
 
+    @staticmethod
+    def _normalize_label_value(label) -> str:
+        if isinstance(label, bytes):
+            return label.decode("utf-8", errors="ignore").strip()
+        if isinstance(label, np.bytes_):
+            return label.tobytes().decode("utf-8", errors="ignore").strip()
+        return str(label).strip()
+
     def _load_centroids(self):
         # ... (Same as before)
         snapshot_path = self.root_dir / "latent_snapshot_final.npz"
@@ -214,12 +222,14 @@ class StyleModule:
                 centroid = z_lab.mean(dim=0)
                 self.class_centroids[int(lab_idx)] = F.normalize(centroid, dim=-1)
                 self.class_latents[int(lab_idx)] = z_lab
-            self.label_list = list(data["label_list"]) if "label_list" in data else INSTRUCTION_ONOMATOPEIA
-            self.label_to_id = {lab: i for i, lab in enumerate(self.label_list)}
+            raw_labels = list(data["label_list"]) if "label_list" in data else INSTRUCTION_ONOMATOPEIA
+            self.label_list = [self._normalize_label_value(label) for label in raw_labels]
+            self.label_to_id = {label: i for i, label in enumerate(self.label_list)}
         else:
             self.class_centroids = {}
             self.class_latents = {}
-            self.label_to_id = {}
+            self.label_list = [self._normalize_label_value(label) for label in INSTRUCTION_ONOMATOPEIA]
+            self.label_to_id = {label: i for i, label in enumerate(self.label_list)}
 
     def _load_norm_stats(self):
         # Priority: run-specific > global joint_training_results > data directory
@@ -761,6 +771,62 @@ class StyleModule:
         return self._prepare_centered_2d(apply_yaw_correction=True, coord_mode=self.coord_mode, standardize=standardize, normalize_height=normalize_height)
 
     @torch.no_grad()
+    def _encode_motion_batch(self, seq_2d: torch.Tensor) -> torch.Tensor:
+        """
+        Encode preprocessed 2D motion sequences with MotionCLIP.
+
+        Args:
+            seq_2d: (B, T, 14, 2) or (T, 14, 2) tensor in HOYO format.
+
+        Returns:
+            (B, 512) normalized motion latents.
+        """
+        if seq_2d.dim() == 3:
+            seq_2d = seq_2d.unsqueeze(0)
+        if seq_2d.dim() != 4 or seq_2d.shape[2] != 14 or seq_2d.shape[3] != 2:
+            raise ValueError(f"Expected (B, T, 14, 2) or (T, 14, 2), got {tuple(seq_2d.shape)}")
+
+        seq_2d = seq_2d.to(device=self.device, dtype=torch.float32)
+
+        # MotionCLIP expects (B, 14, 2, T)
+        x = seq_2d.permute(0, 2, 3, 1)
+        B = x.shape[0]
+        Tcur = x.shape[3]
+        batch = {
+            "x": x,
+            "mask": torch.ones((B, Tcur), dtype=torch.bool, device=self.device),
+            "lengths": torch.full((B,), Tcur, dtype=torch.long, device=self.device),
+            "y": torch.zeros((B,), dtype=torch.long, device=self.device),
+        }
+
+        out = self.motion_model(batch)
+        return F.normalize(out["mu"], dim=-1)
+
+    @torch.no_grad()
+    def encode_hoyo_sample(self, hoyo_sample) -> torch.Tensor:
+        """
+        Encode a HOYO sample into a style latent using the same MotionCLIP pipeline
+        as training. The sample is expected to be already preprocessed
+        (centering + height normalization + standardization).
+
+        Args:
+            hoyo_sample: (T, 14, 2) or (B, T, 14, 2), numpy array or torch tensor.
+
+        Returns:
+            (512,) if input is (T, 14, 2) else (B, 512).
+        """
+        input_was_single = False
+        if torch.is_tensor(hoyo_sample):
+            seq_2d = hoyo_sample
+        else:
+            seq_2d = torch.tensor(hoyo_sample, dtype=torch.float32)
+        if seq_2d.dim() == 3:
+            input_was_single = True
+
+        z = self._encode_motion_batch(seq_2d)
+        return z.squeeze(0) if input_was_single else z
+
+    @torch.no_grad()
     def encode_buffer(self):
         """
         Encodes the current buffer into style latent using MotionCLIP.
@@ -776,30 +842,14 @@ class StyleModule:
         """
         # Apply Yaw correction for rotation invariant style reward
         centered = self._prepare_centered_2d(apply_yaw_correction=True, coord_mode=self.coord_mode)
-
-        # MotionCLIP expects (B, 14, 2, T)
-        x = centered.permute(0, 2, 3, 1)  # (B, 14, 2, 60)
-        
-        B = x.shape[0]
-        Tcur = x.shape[3]
-        
-        batch = {
-            "x": x,
-            "mask": torch.ones((B, Tcur), dtype=torch.bool, device=self.device),
-            "lengths": torch.full((B,), Tcur, dtype=torch.long, device=self.device),
-            "y": torch.zeros((B,), dtype=torch.long, device=self.device)
-        }
-        
-        out = self.motion_model(batch)
-        z_m = F.normalize(out["mu"], dim=-1)
-        return z_m # (B, 512)
+        return self._encode_motion_batch(centered)  # (B, 512)
 
     def compute_current_reward(
         self,
         target_z_onm: torch.Tensor,
         target_teacher_motion: torch.Tensor,
-        beta_text: float = 0.5,
-        beta_teacher_motion: float = 0.5,
+        beta_text: float = 0.0,
+        beta_teacher_motion: float = 1.0,
         beta_centroid: float | None = None,
     ):
                                  

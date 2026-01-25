@@ -47,6 +47,7 @@ class StyleCommandGenerator(CommandTerm):
 
         # Keep track of current text for debugging/logging
         self.current_texts = [""] * self.num_envs
+        self.current_label_ids = [-1] * self.num_envs
         # Deterministic sampling helpers (torch RNG)
         self._style_cycle = torch.empty(0, dtype=torch.long)
         self._style_cycle_ptr = 0
@@ -120,8 +121,12 @@ class StyleCommandGenerator(CommandTerm):
 
         for env_id, style_idx in zip(env_ids_list, style_indices.tolist()):
             env_id = int(env_id)
-            text = styles[style_idx]
+            text = str(styles[style_idx]).strip()
             self.current_texts[env_id] = text
+            label_id = -1
+            if hasattr(self.style_module, "label_to_id"):
+                label_id = self.style_module.label_to_id.get(text, -1)
+            self.current_label_ids[env_id] = int(label_id)
 
             # Encode
             # Note: encode_instruction returns (1, D) tensors, squeeze to (D,)

@@ -9,6 +9,7 @@ from .h1_low_vision_cfg import (
     H1VisionRoughEnvCfg_WithoutSpeedInput,
     H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB,
     H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB_Fixed05,
+    H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03,
     H1VisionRoughEnvCfg_PLAY,
     H1VisionRoughPPORunnerCfg,
     H1VisionRoughPPORunnerCfg_FullFT,
@@ -107,6 +108,16 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB_Fixed05,
+        "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg,
+    },
+)
+
+gym.register(
+    id="h1_vision_without_speedinput_exp_c_fixed03",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03,
         "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg,
     },
 )

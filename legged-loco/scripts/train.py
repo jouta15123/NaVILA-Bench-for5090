@@ -9,7 +9,14 @@
 
 import argparse
 
+import atexit
+import csv
+import faulthandler
+import json
 import os
+import re
+import shlex
+import subprocess
 import sys
 
 # ensure repository modules are discoverable when launched via Isaac Sim kit python
@@ -145,6 +152,24 @@ parser.add_argument(
     default=None,
     help="Comma-separated style list to sample from (overrides INSTRUCTION_ONOMATOPEIA).",
 )
+parser.add_argument(
+    "--run_note",
+    type=str,
+    default=None,
+    help="Short change summary used in run name and RUN.md.",
+)
+parser.add_argument(
+    "--run_purpose",
+    type=str,
+    default=None,
+    help="One-line experiment purpose written to RUN.md.",
+)
+parser.add_argument(
+    "--run_changes",
+    type=str,
+    default=None,
+    help="Change summary (reward/obs/command/arch) written to RUN.md.",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -182,6 +207,319 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.deterministic = False
 torch.backends.cudnn.benchmark = False
+
+EXPERIMENTS_CSV_COLUMNS = [
+    "run_name",
+    "run_name_base",
+    "date",
+    "task",
+    "seed",
+    "note",
+    "experiment_name",
+    "reward_weights",
+    "best_metric",
+    "fall_rate",
+    "mean_vel_x",
+    "checkpoint_best_path",
+    "checkpoint_last_path",
+    "commit_hash",
+    "log_dir",
+    "video_dir",
+]
+
+
+def _format_float_token(value: float) -> str:
+    sign = "m" if value < 0 else ""
+    s = str(abs(value)).replace(".", "p")
+    return f"{sign}{s}"
+
+
+def _sanitize_token(text: str) -> str:
+    cleaned = text.strip().replace(".", "p")
+    cleaned = cleaned.replace(" ", "")
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "", cleaned)
+    return cleaned or "default"
+
+
+class _TeeStream:
+    def __init__(self, primary, secondary):
+        self._primary = primary
+        self._secondary = secondary
+
+    def write(self, data):
+        try:
+            self._primary.write(data)
+        except Exception:
+            pass
+        try:
+            self._secondary.write(data)
+            self._secondary.flush()
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        try:
+            self._primary.flush()
+        except Exception:
+            pass
+        try:
+            self._secondary.flush()
+        except Exception:
+            pass
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def isatty(self):
+        if hasattr(self._primary, "isatty"):
+            try:
+                return bool(self._primary.isatty())
+            except Exception:
+                return False
+        return False
+
+    def fileno(self):
+        if hasattr(self._primary, "fileno"):
+            return self._primary.fileno()
+        raise OSError("fileno")
+
+    @property
+    def encoding(self):
+        return getattr(self._primary, "encoding", "utf-8")
+
+    def __getattr__(self, name):
+        return getattr(self._primary, name)
+
+
+def _enable_run_logging(log_dir: str) -> str | None:
+    """Tee stdout/stderr into <log_dir>/train.log and enable faulthandler.
+
+    Returns the log file path on success, otherwise None.
+    """
+    log_path = os.path.join(log_dir, "train.log")
+    try:
+        log_file = open(log_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except Exception as exc:
+        print(f"[WARN] Failed to open train log at {log_path}: {exc}")
+        return None
+
+    stdout_original = sys.stdout
+    stderr_original = sys.stderr
+    sys.stdout = _TeeStream(stdout_original, log_file)
+    sys.stderr = _TeeStream(stderr_original, log_file)
+
+    try:
+        faulthandler.enable(file=log_file, all_threads=True)
+    except Exception as exc:
+        print(f"[WARN] Failed to enable faulthandler: {exc}")
+
+    def _cleanup():
+        try:
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:
+                pass
+            sys.stdout = stdout_original
+            sys.stderr = stderr_original
+        finally:
+            try:
+                log_file.flush()
+                log_file.close()
+            except Exception:
+                pass
+
+    atexit.register(_cleanup)
+    print(f"[INFO] Stdout/stderr are being tee'd to: {log_path}")
+    return log_path
+
+
+def _collect_reward_weights(env_cfg) -> dict:
+    weights = {}
+    rewards = getattr(env_cfg, "rewards", None)
+    if rewards is None:
+        return weights
+    for name in dir(rewards):
+        if name.startswith("_"):
+            continue
+        term = getattr(rewards, name)
+        if hasattr(term, "weight"):
+            try:
+                weights[name] = float(term.weight)
+            except Exception:
+                continue
+    return weights
+
+
+def _format_reward_summary(weights: dict) -> str:
+    if not weights:
+        return ""
+    parts = [f"{k}={v}" for k, v in sorted(weights.items())]
+    return ";".join(parts)
+
+
+def _build_run_note(args_cli, env_cfg) -> str:
+    if args_cli.run_note:
+        return args_cli.run_note
+    if args_cli.run_name:
+        return args_cli.run_name
+    parts = []
+    if args_cli.history_length:
+        parts.append(f"obsHist{args_cli.history_length}")
+    if args_cli.use_rnn:
+        parts.append("useRnn")
+    if args_cli.use_cnn:
+        parts.append("useCnn")
+    if args_cli.arm_fixed:
+        parts.append("armFixed")
+    if args_cli.terrain and args_cli.terrain != "flat":
+        parts.append(f"terrain{args_cli.terrain}")
+    if args_cli.style_weight is not None:
+        parts.append(f"rStyle{_format_float_token(args_cli.style_weight)}")
+    if args_cli.style_beta_text is not None:
+        parts.append(f"bText{_format_float_token(args_cli.style_beta_text)}")
+    beta_teacher = args_cli.style_beta_teacher_motion
+    if beta_teacher is None and args_cli.style_beta_centroid is not None:
+        beta_teacher = args_cli.style_beta_centroid
+    if beta_teacher is not None:
+        parts.append(f"bTeach{_format_float_token(beta_teacher)}")
+    if args_cli.style_ramp_steps is not None:
+        parts.append(f"ramp{args_cli.style_ramp_steps}")
+    if args_cli.style_centroid_mode is not None:
+        parts.append(f"centroid{args_cli.style_centroid_mode}")
+    if args_cli.style_list is not None:
+        styles = [s.strip() for s in args_cli.style_list.split(",") if s.strip()]
+        parts.append(f"styles{len(styles)}")
+    if not parts:
+        reward_weights = _collect_reward_weights(env_cfg)
+        if "style_tracking" in reward_weights:
+            parts.append(f"rStyle{_format_float_token(reward_weights['style_tracking'])}")
+    return "_".join(parts) if parts else "default"
+
+
+def _build_run_name(args_cli, agent_cfg, env_cfg) -> tuple[str, str]:
+    date_tag = datetime.now().strftime("%Y-%m-%d")
+    task = _sanitize_token(args_cli.task or "task")
+    note = _sanitize_token(_build_run_note(args_cli, env_cfg))
+    seed_val = agent_cfg.seed if agent_cfg.seed is not None else args_cli.seed
+    seed = str(seed_val) if seed_val is not None else "na"
+    run_name_base = f"{date_tag}_{task}_{note}_seed{seed}"
+    return run_name_base, note
+
+
+def _get_git_commit_hash(root: str) -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _stringify_value(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
+def _update_experiments_csv(path: str, row: dict, key_field: str = "run_name") -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rows = []
+    fieldnames = []
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            rows = list(reader)
+    if not fieldnames:
+        fieldnames = list(EXPERIMENTS_CSV_COLUMNS)
+    for key in row.keys():
+        if key not in fieldnames:
+            fieldnames.append(key)
+    updated = False
+    for existing in rows:
+        if existing.get(key_field) == row.get(key_field):
+            existing.update({k: _stringify_value(v) for k, v in row.items()})
+            updated = True
+            break
+    if not updated:
+        rows.append({k: _stringify_value(v) for k, v in row.items()})
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for existing in rows:
+            writer.writerow(existing)
+
+
+def _find_checkpoint_paths(log_dir: str) -> tuple[str | None, str | None]:
+    if not os.path.isdir(log_dir):
+        return None, None
+    candidates = [f for f in os.listdir(log_dir) if f.endswith(".pt")]
+    best = None
+    last = None
+    for fname in candidates:
+        lower = fname.lower()
+        if "best" in lower:
+            best = fname
+        if "last" in lower:
+            last = fname
+    if last is None:
+        step_re = re.compile(r"model_(\d+)\.pt")
+        best_step = -1
+        for fname in candidates:
+            match = step_re.match(fname)
+            if match:
+                step = int(match.group(1))
+                if step > best_step:
+                    best_step = step
+                    last = fname
+    best_path = os.path.join(log_dir, best) if best else None
+    last_path = os.path.join(log_dir, last) if last else None
+    return best_path, last_path
+
+
+def _write_run_md(path: str, metadata: dict) -> None:
+    reward_weights = metadata.get("reward_weights", {})
+    reward_lines = [f"- {k}: {v}" for k, v in sorted(reward_weights.items())] if reward_weights else ["- (none)"]
+    lines = [
+        "# RUN METADATA",
+        "",
+        "## Experiment",
+        f"- Run name: {metadata.get('run_name')}",
+        f"- Base run name: {metadata.get('run_name_base')}",
+        f"- Task: {metadata.get('task')}",
+        f"- Date: {metadata.get('date')}",
+        f"- Seed: {metadata.get('seed')}",
+        f"- Note: {metadata.get('note')}",
+        f"- Purpose: {metadata.get('purpose') or 'N/A'}",
+        f"- Changes: {metadata.get('changes') or 'N/A'}",
+        "",
+        "## Hyperparameters",
+        f"- num_envs: {metadata.get('num_envs')}",
+        f"- max_iterations: {metadata.get('max_iterations')}",
+        f"- learning_rate: {metadata.get('learning_rate')}",
+        "",
+        "## Reward weights",
+        *reward_lines,
+        "",
+        "## Checkpoints",
+        f"- best: {metadata.get('checkpoint_best_path') or 'N/A'}",
+        f"- last: {metadata.get('checkpoint_last_path') or 'N/A'}",
+        "",
+        "## Reproducibility",
+        f"- git_commit: {metadata.get('commit_hash')}",
+        f"- command: `{metadata.get('command')}`",
+        "",
+        "## Artifacts",
+        f"- log_dir: {metadata.get('log_dir')}",
+        f"- stdout_log: {metadata.get('stdout_log_path') or 'N/A'}",
+        f"- video_dir: {metadata.get('video_dir') or 'N/A'}",
+        "",
+    ]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 
 def main():
@@ -254,15 +592,91 @@ def main():
     log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: {time-stamp}_{run_name}
-    log_dir = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
-    log_dir = os.path.join(log_root_path, log_dir)
 
-    # max iterations for training
+    # max iterations for training (override before RUN.md generation)
     if args_cli.max_iterations:
         agent_cfg.max_iterations = args_cli.max_iterations
+
+    run_name_base, run_note = _build_run_name(args_cli, agent_cfg, env_cfg)
+    run_name_effective = run_name_base
+    log_dir = os.path.join(log_root_path, run_name_effective)
+    if os.path.exists(log_dir):
+        suffix = 1
+        while os.path.exists(f"{log_dir}_dup{suffix}"):
+            suffix += 1
+        run_name_effective = f"{run_name_base}_dup{suffix}"
+        log_dir = os.path.join(log_root_path, run_name_effective)
+    agent_cfg.run_name = run_name_effective
+    os.makedirs(log_dir, exist_ok=True)
+
+    stdout_log_path = _enable_run_logging(log_dir)
+    print(f"[INFO] Run name: {run_name_effective}")
+    print(f"[INFO] Log dir: {log_dir}")
+
+    reward_weights = _collect_reward_weights(env_cfg)
+    reward_summary = _format_reward_summary(reward_weights)
+    git_hash = _get_git_commit_hash(REPO_ROOT)
+    command = "python " + " ".join(shlex.quote(arg) for arg in sys.argv)
+    num_envs = getattr(getattr(env_cfg, "scene", None), "num_envs", None) or args_cli.num_envs
+    learning_rate = None
+    for candidate in (
+        ("alg", "learning_rate"),
+        ("alg", "lr"),
+        ("algorithm", "learning_rate"),
+        ("algorithm", "lr"),
+    ):
+        parent = getattr(agent_cfg, candidate[0], None)
+        if parent is not None and hasattr(parent, candidate[1]):
+            learning_rate = getattr(parent, candidate[1])
+            break
+
+    run_metadata = {
+        "run_name": run_name_effective,
+        "run_name_base": run_name_base,
+        "experiment_name": agent_cfg.experiment_name,
+        "task": args_cli.task,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "seed": agent_cfg.seed,
+        "note": run_note,
+        "purpose": args_cli.run_purpose,
+        "changes": args_cli.run_changes,
+        "num_envs": num_envs,
+        "max_iterations": agent_cfg.max_iterations,
+        "learning_rate": learning_rate,
+        "reward_weights": reward_weights,
+        "checkpoint_best_path": None,
+        "checkpoint_last_path": None,
+        "commit_hash": git_hash,
+        "command": command,
+        "log_dir": log_dir,
+        "stdout_log_path": stdout_log_path,
+        "video_dir": os.path.join(log_dir, "videos") if args_cli.video else None,
+    }
+
+    run_md_path = os.path.join(log_dir, "RUN.md")
+    _write_run_md(run_md_path, run_metadata)
+    experiments_csv_path = os.path.join(os.path.dirname(log_root_path), "experiments.csv")
+    _update_experiments_csv(
+        experiments_csv_path,
+        {
+            "run_name": run_name_effective,
+            "run_name_base": run_name_base,
+            "date": run_metadata["date"],
+            "task": args_cli.task,
+            "seed": run_metadata["seed"],
+            "note": run_note,
+            "experiment_name": agent_cfg.experiment_name,
+            "reward_weights": reward_summary,
+            "best_metric": "",
+            "fall_rate": "",
+            "mean_vel_x": "",
+            "checkpoint_best_path": "",
+            "checkpoint_last_path": "",
+            "commit_hash": git_hash,
+            "log_dir": log_dir,
+            "video_dir": run_metadata["video_dir"],
+        },
+    )
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -306,6 +720,19 @@ def main():
 
     # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)
+
+    checkpoint_best, checkpoint_last = _find_checkpoint_paths(log_dir)
+    run_metadata["checkpoint_best_path"] = checkpoint_best
+    run_metadata["checkpoint_last_path"] = checkpoint_last
+    _write_run_md(run_md_path, run_metadata)
+    _update_experiments_csv(
+        experiments_csv_path,
+        {
+            "run_name": run_name_effective,
+            "checkpoint_best_path": checkpoint_best or "",
+            "checkpoint_last_path": checkpoint_last or "",
+        },
+    )
 
     # close the simulator
     env.close()

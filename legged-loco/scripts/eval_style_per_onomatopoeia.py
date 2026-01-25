@@ -126,7 +126,66 @@ parser.add_argument("--hoyo_samples_per_label", type=int, default=5)
 parser.add_argument("--hoyo_eval_interval", type=int, default=10)
 parser.add_argument("--hoyo_metric", type=str, choices=["dtw", "l2"], default="dtw")
 parser.add_argument("--hoyo_dtw_band", type=int, default=10)
+parser.add_argument(
+    "--hoyo_dtw_shift_stride",
+    type=int,
+    default=20,
+    help="Cyclic shift stride for DTW (set 0 to disable).",
+)
+parser.add_argument(
+    "--hoyo_allow_mirror",
+    action="store_true",
+    default=False,
+    help="Allow left-right mirror when computing HOYO errors.",
+)
 parser.add_argument("--hoyo_seed", type=int, default=42)
+parser.add_argument(
+    "--hoyo_joint_weights",
+    type=str,
+    default=None,
+    help="Comma-separated 14 floats or JSON path/dict for weighted joint error.",
+)
+parser.add_argument(
+    "--z_cos_source",
+    type=str,
+    choices=["training", "hoyo"],
+    default="training",
+    help="Which cosine similarity to report as ZCos: training (style reward) or hoyo (H1 vs HOYO reference).",
+)
+parser.add_argument(
+    "--z_cos_ref_shift_sweep",
+    action="store_true",
+    default=False,
+    help="Sweep cosine similarity by cyclically shifting HOYO reference frames.",
+)
+parser.add_argument(
+    "--z_cos_ref_shift_stride",
+    type=int,
+    default=10,
+    help="Stride (frames) for HOYO reference shift sweep.",
+)
+parser.add_argument(
+    "--z_cos_shift_stride",
+    type=int,
+    default=20,
+    help="Stride for best-shift Z similarity (frame roll).",
+)
+parser.add_argument(
+    "--debug_reward_keys",
+    action="store_true",
+    default=False,
+    help="Print extras reward keys once for debugging.",
+)
+parser.add_argument(
+    "--similarity_mode",
+    type=str,
+    choices=["motionclip", "teacher", "both"],
+    default="both",
+    help=(
+        "Which similarity metrics to report: motionclip=H1 vs HOYO (z_cos), "
+        "teacher=style reward sims (text/teacher), both=all."
+    ),
+)
 parser.add_argument(
     "--no_hoyo_yaw_correction",
     action="store_true",
@@ -190,6 +249,45 @@ parser.add_argument(
     default=2,
     help="Frame stride for HOYO GIF (skip frames for smaller file).",
 )
+parser.add_argument(
+    "--hoyo_coord_mode",
+    type=str,
+    choices=["hoyo_front", "legacy_xz_yaw"],
+    default="hoyo_front",
+    help="Coord mode for HOYO comparisons (z_cos/DTW). Default aligns with HOYO dataset.",
+)
+
+# H1 latent dump (for visualization)
+parser.add_argument(
+    "--dump_h1_latents",
+    action="store_true",
+    default=False,
+    help="Dump H1 rollout latents (z_motion) for visualization.",
+)
+parser.add_argument(
+    "--h1_latents_interval",
+    type=int,
+    default=20,
+    help="Step interval to sample H1 latents (default: 20).",
+)
+parser.add_argument(
+    "--h1_latents_envs",
+    type=int,
+    default=1,
+    help="Number of envs to sample per interval for H1 latents.",
+)
+parser.add_argument(
+    "--h1_latents_max_per_style",
+    type=int,
+    default=500,
+    help="Maximum number of H1 latents to store per style (<=0 means unlimited).",
+)
+parser.add_argument(
+    "--h1_latents_out",
+    type=str,
+    default=None,
+    help="Output .npz path for H1 latents (default: output_dir/h1_latents_TIMESTAMP.npz).",
+)
 
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
@@ -206,10 +304,13 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import math
 import torch
+import torch.nn.functional as F
 import numpy as np
 import json
 import imageio
 import random
+import re
+import shlex
 import yaml
 from pathlib import Path
 from collections import defaultdict
@@ -242,6 +343,22 @@ from hoyo_v1_1.models.common import HoyoInstructionDataset, apply_normalization_
 
 # List of onomatopoeia to evaluate
 ONOMATOPOEIA_LIST = INSTRUCTION_ONOMATOPEIA
+HOYO_JOINT_NAMES = [
+    "head",
+    "neck",
+    "r_shoulder",
+    "r_elbow",
+    "r_wrist",
+    "l_shoulder",
+    "l_elbow",
+    "l_wrist",
+    "pelvis",
+    "r_hip",
+    "r_knee",
+    "r_ankle",
+    "l_hip",
+    "l_ankle",
+]
 
 
 def _get_command_tensor(command_term):
@@ -324,6 +441,162 @@ def load_style_speed_table(path: str | None, default_cmd: dict) -> dict:
         for key, value in raw.items():
             table[key] = _normalize_style_speed_entry(value, default_cmd)
     return table
+
+
+def parse_joint_weights(raw: str | None, joint_names: list[str]) -> np.ndarray:
+    if not raw:
+        weights = np.ones(len(joint_names), dtype=np.float32)
+        return weights / weights.sum()
+
+    data = None
+    if os.path.isfile(raw):
+        with open(raw, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        raw_strip = raw.strip()
+        if raw_strip.startswith("{") or raw_strip.startswith("["):
+            try:
+                data = json.loads(raw_strip)
+            except Exception:
+                data = None
+
+    if data is None:
+        parts = [p.strip() for p in raw.split(",") if p.strip()]
+        weights_list = [float(p) for p in parts]
+    elif isinstance(data, dict):
+        weights_list = [float(data.get(name, 0.0)) for name in joint_names]
+    else:
+        weights_list = [float(v) for v in data]
+
+    if len(weights_list) != len(joint_names):
+        raise ValueError(f"hoyo_joint_weights must have {len(joint_names)} values.")
+
+    weights = np.asarray(weights_list, dtype=np.float32)
+    total = float(weights.sum())
+    if total <= 0:
+        raise ValueError("hoyo_joint_weights sum must be positive.")
+    return weights / total
+
+
+def _sanitize_run_tag(tag: str) -> str:
+    cleaned = tag.strip()
+    cleaned = cleaned.replace(os.sep, "_").replace("/", "_").replace("\\", "_")
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", cleaned)
+    return cleaned or "manual"
+
+
+def _resolve_run_tag(load_run: str | None, checkpoint: str | None) -> str:
+    if load_run:
+        return _sanitize_run_tag(load_run)
+    if checkpoint:
+        return _sanitize_run_tag(Path(checkpoint).stem)
+    return "manual"
+
+
+def _write_eval_md(path: Path, metadata: dict) -> None:
+    video_paths = metadata.get("video_paths", [])
+    lines = [
+        "# EVAL METADATA",
+        "",
+        "## Experiment",
+        f"- run_tag: {metadata.get('run_tag')}",
+        f"- load_run: {metadata.get('load_run') or 'N/A'}",
+        f"- checkpoint: {metadata.get('checkpoint') or 'N/A'}",
+        f"- log_dir: {metadata.get('log_dir') or 'N/A'}",
+        f"- task: {metadata.get('task')}",
+        f"- seed: {metadata.get('seed')}",
+        f"- num_envs: {metadata.get('num_envs')}",
+        f"- eval_steps: {metadata.get('eval_steps')}",
+        f"- output_dir: {metadata.get('output_dir')}",
+        f"- video_dir: {metadata.get('video_dir') or 'N/A'}",
+        "",
+        "## Command",
+        f"- `{metadata.get('command')}`",
+        "",
+        "## Videos",
+    ]
+    if video_paths:
+        lines.extend([f"- {p}" for p in video_paths])
+    else:
+        lines.append("- (none)")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+def _as_float(value) -> float | None:
+    if torch.is_tensor(value):
+        if value.numel() == 1:
+            return float(value.item())
+        return float(value.mean().item())
+    if isinstance(value, (int, float, np.number)):
+        return float(value)
+    return None
+
+
+def _normalize_reward_key(key: str) -> str:
+    for prefix in ("metrics/", "rewards/", "reward/"):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
+def _is_reward_key(key: str) -> bool:
+    lower = key.lower()
+    return "reward" in lower
+
+
+def _pick_reward_total_key(keys: list[str]) -> str | None:
+    candidates = [
+        "reward_total",
+        "total_reward",
+        "episode_reward",
+        "reward",
+        "total",
+    ]
+    for cand in candidates:
+        if cand in keys:
+            return cand
+    return None
+
+
+def _pick_style_reward_key(keys: list[str]) -> str | None:
+    candidates = [
+        "style_reward_scaled",
+        "reward_style_scaled",
+        "style_reward",
+        "reward_style",
+        "style_reward_raw",
+    ]
+    for cand in candidates:
+        if cand in keys:
+            return cand
+    for key in keys:
+        if "style" in key and "reward" in key:
+            return key
+    return None
+
+
+def _compute_best_shift_cos_from_buf(
+    style_module,
+    buf_2d: torch.Tensor,
+    z_ref: torch.Tensor,
+    shift_stride: int,
+) -> torch.Tensor:
+    T = buf_2d.shape[1]
+    stride = max(1, int(shift_stride))
+    z_ref_norm = F.normalize(z_ref, dim=-1)
+    best = None
+    for shift in range(0, T, stride):
+        shifted = torch.roll(buf_2d, shifts=shift, dims=1)
+        try:
+            z_h1 = style_module.encode_hoyo_sample(shifted)
+        except Exception:
+            z_h1 = style_module.encode_buffer()
+        z_h1_norm = F.normalize(z_h1, dim=-1)
+        z_cos = (z_h1_norm * z_ref_norm).sum(dim=-1)
+        best = z_cos if best is None else torch.maximum(best, z_cos)
+    return best
 
 
 def quat2eulers(w, x, y, z):
@@ -528,12 +801,23 @@ def _frame_distance(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.mean(np.linalg.norm(a - b, axis=-1)))
 
 
-def dtw_distance(seq_a: np.ndarray, seq_b: np.ndarray, band: int | None = None) -> float:
+def _frame_weighted_distance(a: np.ndarray, b: np.ndarray, weights: np.ndarray) -> float:
+    # a, b: (14, 2), weights: (14,)
+    return float(np.sum(np.linalg.norm(a - b, axis=-1) * weights))
+
+
+def dtw_distance(
+    seq_a: np.ndarray,
+    seq_b: np.ndarray,
+    band: int | None = None,
+    weights: np.ndarray | None = None,
+) -> float:
     # seq_a, seq_b: (T, 14, 2)
     T = seq_a.shape[0]
     U = seq_b.shape[0]
     dp = np.full((T + 1, U + 1), np.inf, dtype=np.float32)
     dp[0, 0] = 0.0
+    use_weights = weights is not None
     for i in range(1, T + 1):
         if band is None:
             j_start, j_end = 1, U
@@ -541,10 +825,33 @@ def dtw_distance(seq_a: np.ndarray, seq_b: np.ndarray, band: int | None = None) 
             j_start = max(1, i - band)
             j_end = min(U, i + band)
         for j in range(j_start, j_end + 1):
-            cost = _frame_distance(seq_a[i - 1], seq_b[j - 1])
+            if use_weights:
+                cost = _frame_weighted_distance(seq_a[i - 1], seq_b[j - 1], weights)
+            else:
+                cost = _frame_distance(seq_a[i - 1], seq_b[j - 1])
             dp[i, j] = cost + min(dp[i - 1, j], dp[i, j - 1], dp[i - 1, j - 1])
     # Normalize by path length to keep scale comparable across runs
     return float(dp[T, U] / max(1, T + U))
+
+
+def dtw_distance_cyclic(
+    seq_a: np.ndarray,
+    seq_b: np.ndarray,
+    band: int | None = None,
+    weights: np.ndarray | None = None,
+    shift_stride: int = 20,
+) -> float:
+    if shift_stride <= 0:
+        return dtw_distance(seq_a, seq_b, band=band, weights=weights)
+    T = seq_b.shape[0]
+    stride = max(1, int(shift_stride))
+    best = float("inf")
+    for shift in range(0, T, stride):
+        shifted = np.roll(seq_b, shift, axis=0)
+        cost = dtw_distance(seq_a, shifted, band=band, weights=weights)
+        if cost < best:
+            best = cost
+    return best
 
 
 def l2_sequence_error(seq_a: np.ndarray, seq_b: np.ndarray) -> float:
@@ -553,17 +860,171 @@ def l2_sequence_error(seq_a: np.ndarray, seq_b: np.ndarray) -> float:
     return float(np.mean(np.linalg.norm(diff, axis=-1)))
 
 
+def _hoyo_error_distance(
+    seq: np.ndarray,
+    ref: np.ndarray,
+    metric: str,
+    band: int,
+    cyclic_shift_stride: int | None = None,
+    allow_mirror: bool = False,
+) -> float:
+    if metric == "dtw":
+        if cyclic_shift_stride is not None and cyclic_shift_stride > 0:
+            base = dtw_distance_cyclic(seq, ref, band=band, shift_stride=cyclic_shift_stride)
+            if allow_mirror:
+                mirrored = dtw_distance_cyclic(
+                    seq,
+                    _mirror_hoyo_sequence(ref),
+                    band=band,
+                    shift_stride=cyclic_shift_stride,
+                )
+                return min(base, mirrored)
+            return base
+        base = dtw_distance(seq, ref, band=band)
+        if allow_mirror:
+            mirrored = dtw_distance(seq, _mirror_hoyo_sequence(ref), band=band)
+            return min(base, mirrored)
+        return base
+    if allow_mirror:
+        return min(
+            l2_sequence_error(seq, ref),
+            l2_sequence_error(seq, _mirror_hoyo_sequence(ref)),
+        )
+    return l2_sequence_error(seq, ref)
+
+
+def compute_hoyo_error_stats(
+    seq: np.ndarray,
+    refs: list[np.ndarray],
+    metric: str,
+    band: int,
+    cyclic_shift_stride: int | None = None,
+    allow_mirror: bool = False,
+) -> tuple[float, float] | tuple[float, None]:
+    if not refs:
+        return float("nan"), None
+    distances = [
+        _hoyo_error_distance(
+            seq,
+            ref,
+            metric=metric,
+            band=band,
+            cyclic_shift_stride=cyclic_shift_stride,
+            allow_mirror=allow_mirror,
+        )
+        for ref in refs
+    ]
+    return float(np.min(distances)), float(np.mean(distances))
+
+
 def compute_hoyo_error(
     seq: np.ndarray,
     refs: list[np.ndarray],
     metric: str,
     band: int,
+    cyclic_shift_stride: int | None = None,
+    allow_mirror: bool = False,
 ) -> float:
-    if not refs:
-        return float("nan")
+    stats = compute_hoyo_error_stats(
+        seq,
+        refs,
+        metric=metric,
+        band=band,
+        cyclic_shift_stride=cyclic_shift_stride,
+        allow_mirror=allow_mirror,
+    )
+    return stats[0]
+
+
+def _compute_best_cyclic_shift(seq: np.ndarray, ref: np.ndarray) -> tuple[np.ndarray, int]:
+    """Find the best cyclic shift of seq that minimizes L2 distance to ref."""
+    T = min(seq.shape[0], ref.shape[0])
+    seq_t = seq[:T]
+    ref_t = ref[:T]
+    
+    best_shift = 0
+    best_dist = float("inf")
+    best_shifted_seq = seq_t.copy()
+
+    # Brute-force search for best shift (T is small, typically ~100)
+    for i in range(T):
+        shifted = np.roll(seq_t, i, axis=0) # Shift generic axis 0 (time)
+        dist = float(np.mean(np.linalg.norm(shifted - ref_t, axis=-1)))
+        if dist < best_dist:
+            best_dist = dist
+            best_shift = i
+            best_shifted_seq = shifted
+            
+    return best_shifted_seq, best_shift
+
+
+def compute_weighted_joint_error(
+    seq: np.ndarray,
+    ref: np.ndarray,
+    weights: np.ndarray,
+    metric: str = "l2",
+    band: int | None = None,
+    align_phase: bool = True,
+    cyclic_shift_stride: int | None = None,
+    allow_mirror: bool = False,
+) -> tuple[float, np.ndarray | None]:
+    if seq.size == 0 or ref.size == 0:
+        return float("nan"), np.full((seq.shape[1],), np.nan, dtype=np.float32)
+
+    if metric == "l2":
+        if align_phase:
+            seq_aligned, _ = _compute_best_cyclic_shift(seq, ref)
+            seq_aligned_m = None
+            if allow_mirror:
+                seq_aligned_m, _ = _compute_best_cyclic_shift(seq, _mirror_hoyo_sequence(ref))
+        else:
+            seq_aligned = seq
+            seq_aligned_m = seq if allow_mirror else None
+
+        T = min(seq_aligned.shape[0], ref.shape[0])
+        seq_t = seq_aligned[:T]
+        ref_t = ref[:T]
+        per_joint = np.mean(np.linalg.norm(seq_t - ref_t, axis=-1), axis=0)
+        weighted = float(np.sum(per_joint * weights))
+        if allow_mirror:
+            mirrored_ref = _mirror_hoyo_sequence(ref_t)
+            seq_m = seq_aligned_m if seq_aligned_m is not None else seq_aligned
+            Tm = min(seq_m.shape[0], mirrored_ref.shape[0])
+            seq_m_t = seq_m[:Tm]
+            ref_m_t = mirrored_ref[:Tm]
+            per_joint_m = np.mean(np.linalg.norm(seq_m_t - ref_m_t, axis=-1), axis=0)
+            weighted_m = float(np.sum(per_joint_m * weights))
+            if weighted_m < weighted:
+                return weighted_m, per_joint_m
+        return weighted, per_joint
     if metric == "dtw":
-        return min(dtw_distance(seq, ref, band=band) for ref in refs)
-    return min(l2_sequence_error(seq, ref) for ref in refs)
+        T = min(seq.shape[0], ref.shape[0])
+        seq_t = seq[:T]
+        ref_t = ref[:T]
+        if cyclic_shift_stride is not None and cyclic_shift_stride > 0:
+            weighted = dtw_distance_cyclic(
+                seq_t,
+                ref_t,
+                band=band,
+                weights=weights,
+                shift_stride=cyclic_shift_stride,
+            )
+            if allow_mirror:
+                weighted_m = dtw_distance_cyclic(
+                    seq_t,
+                    _mirror_hoyo_sequence(ref_t),
+                    band=band,
+                    weights=weights,
+                    shift_stride=cyclic_shift_stride,
+                )
+                weighted = min(weighted, weighted_m)
+        else:
+            weighted = dtw_distance(seq_t, ref_t, band=band, weights=weights)
+            if allow_mirror:
+                weighted_m = dtw_distance(seq_t, _mirror_hoyo_sequence(ref_t), band=band, weights=weights)
+                weighted = min(weighted, weighted_m)
+        return weighted, None
+    raise ValueError(f"Unsupported joint error metric: {metric}")
 
 
 def _axis_range_stats(arr: np.ndarray) -> dict:
@@ -578,6 +1039,25 @@ def _axis_range_stats(arr: np.ndarray) -> dict:
         "y_max": float(np.max(y)),
         "y_mean": float(np.mean(y)),
     }
+
+
+def _mirror_hoyo_sequence(seq: np.ndarray) -> np.ndarray:
+    """Mirror HOYO sequence (x flip + left/right joint swap).
+
+    Assumes HOYO joint order:
+    head, neck, r_shoulder, r_elbow, r_wrist, l_shoulder, l_elbow, l_wrist,
+    pelvis, r_hip, r_knee, r_ankle, l_hip, l_ankle.
+    """
+    if seq.ndim != 3 or seq.shape[1] != 14 or seq.shape[2] != 2:
+        raise ValueError(f"Expected (T, 14, 2) seq, got {seq.shape}")
+    mirrored = seq.copy()
+    mirrored[..., 0] *= -1
+    pairs = [(2, 5), (3, 6), (4, 7), (9, 12), (11, 13)]
+    for r, l in pairs:
+        tmp = mirrored[:, r, :].copy()
+        mirrored[:, r, :] = mirrored[:, l, :]
+        mirrored[:, l, :] = tmp
+    return mirrored
 
 
 def _set_style_for_envs(style_gen, env_ids, onomatopoeia: str, style_cache: dict | None = None) -> None:
@@ -626,17 +1106,34 @@ def _detect_falls(env, dones: torch.Tensor, extras: dict | None) -> torch.Tensor
 def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device,
                           record_video: bool = False, video_path: str | None = None,
                           teacher_cache: dict | None = None,
+                          compute_hoyo_error: bool = True,
                           hoyo_metric: str = "dtw",
                           hoyo_eval_interval: int = 10,
                           hoyo_dtw_band: int = 10,
+                          hoyo_dtw_shift_stride: int = 20,
                           hoyo_apply_yaw_correction: bool = True,
                           base_velocity_mode: str = "env",
                           base_cmd_default: dict | None = None,
                           style_speed_table: dict | None = None,
                           style_cache: dict | None = None,
+                          joint_weights: np.ndarray | None = None,
+                          hoyo_rng: random.Random | None = None,
+                          similarity_mode: str = "both",
+                          z_cos_shift_stride: int = 10,
+                          z_cos_source: str = "training",
+                          z_cos_ref_shift_sweep: bool = False,
+                          z_cos_ref_shift_stride: int = 10,
+                          debug_reward_keys: bool = False,
                           debug_quat: bool = False,
                           debug_dones: bool = False,
-                          collect_hoyo_2d: bool = False):
+                          hoyo_coord_mode: str = "hoyo_front",
+                          collect_hoyo_2d: bool = False,
+                          collect_h1_latents: bool = False,
+                          h1_latents_interval: int = 20,
+                          h1_latents_envs: int = 1,
+                          h1_latents_max_per_style: int = 500,
+                          h1_latent_store: dict | None = None,
+                          h1_label_idx: int | None = None):
     """Evaluate a single onomatopoeia and collect metrics.
     
     Returns:
@@ -654,6 +1151,12 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "heading": 0.0,
     }
     style_speed_table = style_speed_table or {}
+    joint_weights = (
+        joint_weights
+        if joint_weights is not None
+        else np.ones(len(HOYO_JOINT_NAMES), dtype=np.float32) / len(HOYO_JOINT_NAMES)
+    )
+    hoyo_rng = hoyo_rng or random.Random()
     
     # Reset environment and rebuild observation with history buffer (if enabled)
     # Note: some wrappers return the raw policy obs on reset; calling
@@ -701,11 +1204,28 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "text_sims": [],
         "teacher_motion_sims": [],
         "hoyo_errors": [],
+        "hoyo_errors_mean": [],
+        "z_cos_best": [],
+        "z_cos_ref_shift": defaultdict(list),
+        "weighted_joint_errors_fixed": [],
+        "weighted_joint_errors_shift": [],
+        "weighted_joint_errors_dtw": [],
+        "per_joint_errors": [],
     }
     # Per-env accumulators (lightweight)
     num_envs = env.unwrapped.num_envs
     vel_x_sum = torch.zeros(num_envs, device=device)
     vel_x_count = torch.zeros(num_envs, device=device)
+
+    # Reward component tracking
+    reward_components = defaultdict(list)
+    reward_keys_logged = False
+    use_teacher_sims = similarity_mode in ("teacher", "both") or z_cos_source == "training"
+    use_motionclip_sims = (
+        similarity_mode in ("motionclip", "both")
+        or z_cos_source == "hoyo"
+        or z_cos_ref_shift_sweep
+    )
     
     episode_step_counts = torch.zeros(env.unwrapped.num_envs, device=device)
     fall_count = 0
@@ -718,6 +1238,13 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
     quat_logged = False
     done_logged = False
     for step in tqdm(range(num_steps), desc=f"Evaluating {onomatopoeia}"):
+        if base_cmd_term is not None and base_velocity_mode != "env":
+            if base_velocity_mode == "style_table":
+                base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
+            else:
+                base_cmd = base_cmd_default
+            _set_base_velocity_for_envs(base_cmd_term, range(env.unwrapped.num_envs), base_cmd)
+
         # Use no_grad instead of inference_mode to avoid creating inference tensors
         # that later reject in-place updates during env.reset().
         with torch.no_grad():
@@ -776,20 +1303,37 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
             # Get style similarity from extras
             if hasattr(env.unwrapped, "extras"):
                 extras = env.unwrapped.extras
-                if "metrics/style_text_sim" in extras:
+                if use_teacher_sims and "metrics/style_text_sim" in extras:
                     metrics["text_sims"].append(extras["metrics/style_text_sim"].item())
-                if "metrics/style_teacher_motion_sim" in extras:
+                if use_teacher_sims and "metrics/style_teacher_motion_sim" in extras:
                     metrics["teacher_motion_sims"].append(extras["metrics/style_teacher_motion_sim"].item())
-                elif "metrics/style_centroid_sim" in extras:
+                elif use_teacher_sims and "metrics/style_centroid_sim" in extras:
                     metrics["teacher_motion_sims"].append(extras["metrics/style_centroid_sim"].item())
+                if isinstance(extras, dict):
+                    if debug_reward_keys and not reward_keys_logged:
+                        reward_keys = sorted([k for k in extras.keys() if _is_reward_key(k)])
+                        print(f"[DEBUG] reward-related extras keys: {reward_keys}")
+                        reward_keys_logged = True
+                    for key, value in extras.items():
+                        if not isinstance(key, str) or not _is_reward_key(key):
+                            continue
+                        val = _as_float(value)
+                        if val is None:
+                            continue
+                        norm_key = _normalize_reward_key(key)
+                        reward_components[norm_key].append(val)
             
             # Collect HOYO 2D keypoints for visualization (env 0 only)
             if collect_hoyo_2d and style_module is not None:
                 try:
                     # Get the 2D projection (last frame from buffer)
-                    # get_hoyo_compatible_keymap returns (B, T, 14, 2)
-                    full_buffer_2d = style_module.get_hoyo_compatible_keymap(
-                        standardize=True, normalize_height=True
+                    # get_buffer_for_hoyo_comparison returns (B, T, 14, 2)
+                    full_buffer_2d = style_module.get_buffer_for_hoyo_comparison(
+                        apply_yaw_correction=hoyo_apply_yaw_correction,
+                        centering="first_frame_com",
+                        coord_mode=hoyo_coord_mode,
+                        standardize=True,
+                        normalize_height=True,
                     )
                     latest_frame_2d = full_buffer_2d[:, -1]  # (B, 14, 2)
                     hoyo_2d_history.append(latest_frame_2d[0].detach().cpu().numpy())
@@ -809,13 +1353,6 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                 episode_count += int(dones.sum().item())
                 # Enforce fixed style after reset
                 _set_style_for_envs(style_gen, done_ids, onomatopoeia, style_cache=style_cache)
-                if base_cmd_term is not None and base_velocity_mode != "env":
-                    if base_velocity_mode == "style_table":
-                        base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
-                    else:
-                        base_cmd = base_cmd_default
-                    _set_base_velocity_for_envs(base_cmd_term, done_ids, base_cmd)
-
                 if debug_dones and not done_logged:
                     ep_len_buf = getattr(env.unwrapped, "episode_length_buf", None)
                     reset_buf = getattr(env.unwrapped, "reset_buf", None)
@@ -827,38 +1364,165 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
                     print(msg)
                     done_logged = True
 
-            # Enforce base_velocity every step to avoid resampling drift
-            if base_cmd_term is not None and base_velocity_mode != "env":
-                if base_velocity_mode == "style_table":
-                    base_cmd = style_speed_table.get(onomatopoeia, base_cmd_default)
-                else:
-                    base_cmd = base_cmd_default
-                _set_base_velocity_for_envs(base_cmd_term, range(env.unwrapped.num_envs), base_cmd)
-                obs, _ = env.get_observations()
+            # H1 latent dump (interval-based)
+            if collect_h1_latents and style_module is not None and h1_latent_store is not None:
+                if h1_label_idx is not None:
+                    max_per_style = h1_latents_max_per_style
+                    current_count = h1_latent_store["counts"].get(h1_label_idx, 0)
+                    if max_per_style <= 0 or current_count < max_per_style:
+                        if step % max(1, h1_latents_interval) == 0:
+                            try:
+                                buf_2d = style_gen.style_module.get_buffer_for_hoyo_comparison(
+                                    apply_yaw_correction=hoyo_apply_yaw_correction,
+                                    centering="first_frame_com",
+                                    coord_mode=hoyo_coord_mode,
+                                )
+                                warm_mask = style_gen.style_module.warmup_counter >= style_gen.style_module.warmup_frames
+                                if warm_mask.any().item():
+                                    try:
+                                        z_h1 = style_module.encode_hoyo_sample(buf_2d)
+                                    except Exception:
+                                        z_h1 = style_module.encode_buffer()
+                                    warm_ids = torch.where(warm_mask)[0].tolist()
+                                    if h1_latents_envs > 0:
+                                        warm_ids = warm_ids[: h1_latents_envs]
+                                    for env_id in warm_ids:
+                                        current_count = h1_latent_store["counts"].get(h1_label_idx, 0)
+                                        if max_per_style > 0 and current_count >= max_per_style:
+                                            break
+                                        h1_latent_store["z"].append(
+                                            z_h1[env_id].detach().cpu().numpy()
+                                        )
+                                        h1_latent_store["labels_idx"].append(int(h1_label_idx))
+                                        h1_latent_store["counts"][h1_label_idx] = current_count + 1
+                            except Exception:
+                                pass
 
-            # HOYO error (optional, interval-based)
-            if teacher_cache is not None and (step % max(1, hoyo_eval_interval) == 0):
+            # HOYO-related metrics (interval-based)
+            if (
+                (teacher_cache is not None or (z_cos_ref_shift_sweep and z_cos_source == "training"))
+                and (step % max(1, hoyo_eval_interval) == 0)
+            ):
                 try:
+                    refs = teacher_cache.get(onomatopoeia, []) if teacher_cache is not None else []
+                    ref_sample = hoyo_rng.choice(refs) if refs else None
+
                     # Use HOYO-compatible preprocessing (matching HOYO dataset format)
                     buf_2d = style_gen.style_module.get_buffer_for_hoyo_comparison(
                         apply_yaw_correction=hoyo_apply_yaw_correction,
                         centering="first_frame_com",
+                        coord_mode=hoyo_coord_mode,
                     )
                     warm_mask = style_gen.style_module.warmup_counter >= style_gen.style_module.warmup_frames
                     buf_np = buf_2d.detach().cpu().numpy()
                     warm_np = warm_mask.detach().cpu().numpy()
-                    refs = teacher_cache.get(onomatopoeia, [])
-                    for env_id in range(env.unwrapped.num_envs):
-                        if not warm_np[env_id]:
-                            continue
-                        err = compute_hoyo_error(
-                            buf_np[env_id],
-                            refs,
-                            metric=hoyo_metric,
-                            band=hoyo_dtw_band,
-                        )
-                        if not np.isnan(err):
-                            metrics["hoyo_errors"].append(err)
+
+                    # HOYO error vs all refs (legacy min distance)
+                    if refs and compute_hoyo_error:
+                        for env_id in range(env.unwrapped.num_envs):
+                            if not warm_np[env_id]:
+                                continue
+                            err_min, err_mean = compute_hoyo_error_stats(
+                                buf_np[env_id],
+                                refs,
+                                metric=hoyo_metric,
+                                band=hoyo_dtw_band,
+                                cyclic_shift_stride=hoyo_dtw_shift_stride,
+                                allow_mirror=args_cli.hoyo_allow_mirror,
+                            )
+                            if not np.isnan(err_min):
+                                metrics["hoyo_errors"].append(err_min)
+                            if err_mean is not None and not np.isnan(err_mean):
+                                metrics["hoyo_errors_mean"].append(err_mean)
+
+                    # Weighted joint error vs a random reference sample
+                    if ref_sample is not None and compute_hoyo_error:
+                        for env_id in range(env.unwrapped.num_envs):
+                            if not warm_np[env_id]:
+                                continue
+                            weighted_err_fixed, _ = compute_weighted_joint_error(
+                                buf_np[env_id],
+                                ref_sample,
+                                joint_weights,
+                                metric="l2",
+                                align_phase=False,
+                                allow_mirror=args_cli.hoyo_allow_mirror,
+                            )
+                            if not np.isnan(weighted_err_fixed):
+                                metrics["weighted_joint_errors_fixed"].append(weighted_err_fixed)
+                            weighted_err_shift, per_joint = compute_weighted_joint_error(
+                                buf_np[env_id],
+                                ref_sample,
+                                joint_weights,
+                                metric="l2",
+                                align_phase=True,
+                                allow_mirror=args_cli.hoyo_allow_mirror,
+                            )
+                            if not np.isnan(weighted_err_shift):
+                                metrics["weighted_joint_errors_shift"].append(weighted_err_shift)
+                                if per_joint is not None:
+                                    metrics["per_joint_errors"].append(per_joint)
+                            weighted_err_dtw, _ = compute_weighted_joint_error(
+                                buf_np[env_id],
+                                ref_sample,
+                                joint_weights,
+                                metric="dtw",
+                                band=hoyo_dtw_band,
+                                cyclic_shift_stride=hoyo_dtw_shift_stride,
+                                align_phase=False,
+                                allow_mirror=args_cli.hoyo_allow_mirror,
+                            )
+                            if not np.isnan(weighted_err_dtw):
+                                metrics["weighted_joint_errors_dtw"].append(weighted_err_dtw)
+
+                    # Z similarity (H1 rollout vs HOYO reference)
+                    if use_motionclip_sims and style_module is not None and warm_mask.any().item():
+                        if z_cos_source == "hoyo" and ref_sample is not None:
+                            z_ref = style_module.encode_hoyo_sample(ref_sample).view(1, -1)
+                            z_ref = F.normalize(z_ref, dim=-1)
+                            z_cos_best = _compute_best_shift_cos_from_buf(
+                                style_module,
+                                buf_2d,
+                                z_ref,
+                                z_cos_shift_stride,
+                            )
+                            z_cos_best_valid = z_cos_best[warm_mask].detach().cpu().numpy().tolist()
+                            metrics["z_cos_best"].extend(z_cos_best_valid)
+                        if z_cos_ref_shift_sweep:
+                            if z_cos_source == "training":
+                                # Training-style sweep: shift H1 buffer, compare to fixed teacher latent.
+                                buf_train = style_module._prepare_centered_2d(
+                                    apply_yaw_correction=True,
+                                    coord_mode=style_module.coord_mode,
+                                )
+                                z_teacher = F.normalize(style_gen.teacher_motion_latents, dim=-1)
+                                stride = max(1, int(z_cos_ref_shift_stride))
+                                Tref = buf_train.shape[1]
+                                for shift in range(0, Tref, stride):
+                                    shifted = torch.roll(buf_train, shifts=shift, dims=1)
+                                    z_h1_shift = style_module.encode_hoyo_sample(shifted)
+                                    z_h1_shift = F.normalize(z_h1_shift, dim=-1)
+                                    z_cos_shift = (z_h1_shift * z_teacher).sum(dim=-1)
+                                    z_cos_shift_valid = z_cos_shift[warm_mask].detach().cpu().numpy().tolist()
+                                    metrics["z_cos_ref_shift"][int(shift)].extend(z_cos_shift_valid)
+                            else:
+                                if ref_sample is None:
+                                    continue
+                                try:
+                                    z_h1 = style_module.encode_hoyo_sample(buf_2d)
+                                except Exception:
+                                    z_h1 = style_module.encode_buffer()
+                                z_h1 = F.normalize(z_h1, dim=-1)
+                                stride = max(1, int(z_cos_ref_shift_stride))
+                                ref_np = ref_sample
+                                Tref = ref_np.shape[0]
+                                for shift in range(0, Tref, stride):
+                                    ref_shift = np.roll(ref_np, shift, axis=0)
+                                    z_ref_shift = style_module.encode_hoyo_sample(ref_shift).view(1, -1)
+                                    z_ref_shift = F.normalize(z_ref_shift, dim=-1)
+                                    z_cos_shift = (z_h1 * z_ref_shift).sum(dim=-1)
+                                    z_cos_shift_valid = z_cos_shift[warm_mask].detach().cpu().numpy().tolist()
+                                    metrics["z_cos_ref_shift"][int(shift)].extend(z_cos_shift_valid)
                 except Exception:
                     pass
             
@@ -896,20 +1560,119 @@ def evaluate_onomatopoeia(env, policy, onomatopoeia: str, num_steps: int, device
         "mean_roll": np.mean(metrics["roll"]),
         "mean_pitch": np.mean(metrics["pitch"]),
         "mean_episode_length": np.mean(metrics["episode_lengths"]) if metrics["episode_lengths"] else num_steps,
-        "mean_text_sim": np.mean(metrics["text_sims"]) if metrics["text_sims"] else 0.0,
-        "mean_teacher_motion_sim": np.mean(metrics["teacher_motion_sims"]) if metrics["teacher_motion_sims"] else 0.0,
+        "mean_text_sim": np.mean(metrics["text_sims"]) if metrics["text_sims"] else None,
+        "mean_teacher_motion_sim": np.mean(metrics["teacher_motion_sims"]) if metrics["teacher_motion_sims"] else None,
+        "std_teacher_motion_sim": np.std(metrics["teacher_motion_sims"]) if metrics["teacher_motion_sims"] else None,
+        "max_teacher_motion_sim": np.max(metrics["teacher_motion_sims"]) if metrics["teacher_motion_sims"] else None,
         "fall_rate": (fall_count / episode_count) if episode_count > 0 else 0.0,
         "fall_count": fall_count,
         "episode_count": episode_count,
-        "mean_hoyo_error": np.mean(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
-        "std_hoyo_error": np.std(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
+        "mean_hoyo_error_min": np.mean(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
+        "std_hoyo_error_min": np.std(metrics["hoyo_errors"]) if metrics["hoyo_errors"] else None,
+        "mean_hoyo_error_mean": np.mean(metrics["hoyo_errors_mean"]) if metrics["hoyo_errors_mean"] else None,
+        "std_hoyo_error_mean": np.std(metrics["hoyo_errors_mean"]) if metrics["hoyo_errors_mean"] else None,
+        "mean_z_cos_best": np.mean(metrics["z_cos_best"]) if metrics["z_cos_best"] else None,
+        "std_z_cos_best": np.std(metrics["z_cos_best"]) if metrics["z_cos_best"] else None,
+        "max_z_cos_best": np.max(metrics["z_cos_best"]) if metrics["z_cos_best"] else None,
+        "mean_weighted_joint_error_fixed": np.mean(metrics["weighted_joint_errors_fixed"]) if metrics["weighted_joint_errors_fixed"] else None,
+        "std_weighted_joint_error_fixed": np.std(metrics["weighted_joint_errors_fixed"]) if metrics["weighted_joint_errors_fixed"] else None,
+        "mean_weighted_joint_error_shift": np.mean(metrics["weighted_joint_errors_shift"]) if metrics["weighted_joint_errors_shift"] else None,
+        "std_weighted_joint_error_shift": np.std(metrics["weighted_joint_errors_shift"]) if metrics["weighted_joint_errors_shift"] else None,
+        "mean_weighted_joint_error_dtw": np.mean(metrics["weighted_joint_errors_dtw"]) if metrics["weighted_joint_errors_dtw"] else None,
+        "std_weighted_joint_error_dtw": np.std(metrics["weighted_joint_errors_dtw"]) if metrics["weighted_joint_errors_dtw"] else None,
     }
+    if summary["mean_hoyo_error_mean"] is not None:
+        summary["mean_hoyo_error"] = summary["mean_hoyo_error_mean"]
+        summary["std_hoyo_error"] = summary["std_hoyo_error_mean"]
+    else:
+        summary["mean_hoyo_error"] = summary["mean_hoyo_error_min"]
+        summary["std_hoyo_error"] = summary["std_hoyo_error_min"]
+    if z_cos_source == "training":
+        summary["mean_z_cos"] = summary["mean_teacher_motion_sim"]
+        summary["std_z_cos"] = summary["std_teacher_motion_sim"]
+        summary["max_z_cos"] = summary["max_teacher_motion_sim"]
+    elif summary["mean_z_cos_best"] is not None:
+        summary["mean_z_cos"] = summary["mean_z_cos_best"]
+        summary["std_z_cos"] = summary["std_z_cos_best"]
+        summary["max_z_cos"] = summary["max_z_cos_best"]
+    else:
+        summary["mean_z_cos"] = None
+        summary["std_z_cos"] = None
+        summary["max_z_cos"] = None
+    summary["mean_weighted_joint_error"] = summary["mean_weighted_joint_error_shift"]
+    summary["std_weighted_joint_error"] = summary["std_weighted_joint_error_shift"]
+    summary["E_fixed"] = summary["mean_weighted_joint_error_fixed"]
+    summary["E_shift"] = summary["mean_weighted_joint_error_shift"]
+    summary["E_dtw"] = summary["mean_weighted_joint_error_dtw"]
+    summary["E_align"] = summary["E_dtw"]
     if vel_x_count.sum().item() > 0:
         vel_x_means = (vel_x_sum / vel_x_count.clamp(min=1.0)).detach().cpu().numpy()
         summary["env_velocity_x_mean"] = float(np.mean(vel_x_means))
         summary["env_velocity_x_std"] = float(np.std(vel_x_means))
         summary["env_velocity_x_median"] = float(np.median(vel_x_means))
         summary["env_velocity_x_iqr"] = float(np.percentile(vel_x_means, 75) - np.percentile(vel_x_means, 25))
+    if metrics["per_joint_errors"]:
+        per_joint_mean = np.mean(np.stack(metrics["per_joint_errors"], axis=0), axis=0)
+        summary["mean_joint_errors"] = per_joint_mean.tolist()
+        summary["joint_error_weights"] = joint_weights.tolist()
+        for name, val in zip(HOYO_JOINT_NAMES, per_joint_mean):
+            summary[f"joint_error_{name}"] = float(val)
+    if metrics["z_cos_ref_shift"]:
+        sweep = []
+        for shift, vals in sorted(metrics["z_cos_ref_shift"].items()):
+            if not vals:
+                continue
+            sweep.append(
+                {
+                    "shift": int(shift),
+                    "mean": float(np.mean(vals)),
+                    "std": float(np.std(vals)),
+                    "count": int(len(vals)),
+                }
+            )
+        if sweep:
+            summary["z_cos_ref_shift_sweep"] = sweep
+            shift_means = [entry["mean"] for entry in sweep]
+            summary["mean_z_cos_ref_shift_mean"] = float(np.mean(shift_means))
+            summary["min_z_cos_ref_shift_mean"] = float(np.min(shift_means))
+            summary["max_z_cos_ref_shift_mean"] = float(np.max(shift_means))
+            shift0 = next((entry for entry in sweep if entry["shift"] == 0), None)
+            if shift0 is not None:
+                summary["mean_z_cos_ref_shift0"] = float(shift0["mean"])
+                summary["std_z_cos_ref_shift0"] = float(shift0["std"])
+
+    if z_cos_source == "hoyo" and "mean_z_cos_ref_shift0" in summary:
+        summary["mean_z_cos"] = summary["mean_z_cos_ref_shift0"]
+        summary["std_z_cos"] = summary.get("std_z_cos_ref_shift0")
+        summary["max_z_cos"] = summary.get("max_z_cos_ref_shift_mean")
+
+    if reward_components:
+        reward_means = {k: float(np.mean(v)) for k, v in reward_components.items() if v}
+        reward_stds = {k: float(np.std(v)) for k, v in reward_components.items() if v}
+        summary["reward_components_mean"] = reward_means
+        summary["reward_components_std"] = reward_stds
+        keys = list(reward_means.keys())
+        total_key = _pick_reward_total_key(keys)
+        style_key = _pick_style_reward_key(keys)
+        reward_total = reward_means.get(total_key) if total_key else None
+        reward_style = reward_means.get(style_key) if style_key else None
+        if reward_total is None:
+            reward_total = sum(
+                v for k, v in reward_means.items()
+                if "reward" in k and "total" not in k and "scale" not in k and "weight" not in k
+            ) if reward_means else None
+        summary["reward_total_mean"] = reward_total
+        summary["reward_style_mean"] = reward_style
+        comp_vals = [
+            v for k, v in reward_means.items()
+            if ("reward" in k) and ("total" not in k) and ("scale" not in k) and ("weight" not in k)
+        ]
+        reward_sumabs = float(np.sum(np.abs(comp_vals))) if comp_vals else None
+        summary["reward_sumabs_mean"] = reward_sumabs
+        if reward_sumabs is not None and reward_style is not None:
+            summary["ratio_style_reward_sumabs"] = float(abs(reward_style) / (reward_sumabs + 1e-6))
+        if reward_total is not None and reward_style is not None:
+            summary["ratio_style_reward_total"] = float(reward_style / (reward_total + 1e-6))
     
     return summary, metrics, hoyo_2d_history
 
@@ -950,7 +1713,40 @@ def save_results_to_csv(all_results, output_path, timestamp):
             "episode_count",
             "mean_hoyo_error",
             "std_hoyo_error",
+            "mean_hoyo_error_min",
+            "std_hoyo_error_min",
+            "mean_hoyo_error_mean",
+            "std_hoyo_error_mean",
+            "mean_z_cos",
+            "std_z_cos",
+            "max_z_cos",
+            "mean_z_cos_ref_shift0",
+            "std_z_cos_ref_shift0",
+            "mean_z_cos_ref_shift_mean",
+            "min_z_cos_ref_shift_mean",
+            "max_z_cos_ref_shift_mean",
+            "mean_z_cos_best",
+            "std_z_cos_best",
+            "max_z_cos_best",
+            "mean_weighted_joint_error",
+            "std_weighted_joint_error",
+            "mean_weighted_joint_error_fixed",
+            "std_weighted_joint_error_fixed",
+            "mean_weighted_joint_error_shift",
+            "std_weighted_joint_error_shift",
+            "mean_weighted_joint_error_dtw",
+            "std_weighted_joint_error_dtw",
+            "reward_total_mean",
+            "reward_style_mean",
+            "reward_sumabs_mean",
+            "ratio_style_reward_sumabs",
+            "ratio_style_reward_total",
+            "E_fixed",
+            "E_shift",
+            "E_dtw",
+            "E_align",
         ]
+        column_order += [f"joint_error_{name}" for name in HOYO_JOINT_NAMES]
 
         # Keep only existing columns
         existing_cols = [col for col in column_order if col in df.columns]
@@ -1160,7 +1956,12 @@ def main():
     elif args_cli.compute_hoyo_error:
         compute_hoyo_error = True
     hoyo_apply_yaw_correction = not args_cli.no_hoyo_yaw_correction
-    if compute_hoyo_error:
+    need_hoyo_refs = (
+        compute_hoyo_error
+        or (args_cli.similarity_mode in ("motionclip", "both"))
+        or (args_cli.z_cos_ref_shift_sweep and args_cli.z_cos_source == "hoyo")
+    )
+    if need_hoyo_refs:
         try:
             hoyo_root = Path(args_cli.hoyo_root) if args_cli.hoyo_root else (Path(NAVILA_ROOT) / "hoyo_v1_1")
             run_name = env.unwrapped.command_manager._terms["style_command"].style_module.run_name
@@ -1191,6 +1992,12 @@ def main():
         for style in styles_to_eval:
             z_onm, teacher_motion = style_term.style_module.encode_instruction(style)
             style_cache[style] = (z_onm.squeeze(0), teacher_motion.squeeze(0))
+        current_coord = getattr(style_term.style_module, "coord_mode", None)
+        if current_coord is not None and current_coord != args_cli.hoyo_coord_mode:
+            print(
+                "[INFO] HOYO comparison coord_mode="
+                f"{args_cli.hoyo_coord_mode} (style_module coord_mode={current_coord})"
+            )
     
     # Output directory
     output_dir = Path(args_cli.output_dir)
@@ -1200,14 +2007,45 @@ def main():
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Video directory
+    run_tag = _resolve_run_tag(args_cli.load_run, args_cli.checkpoint)
+    eval_command = "python " + " ".join(shlex.quote(arg) for arg in sys.argv)
+    eval_md_path = output_dir / f"EVAL_{run_tag}_{timestamp}.md"
+    video_paths = []
     if args_cli.video:
-        video_dir = output_dir / "videos"
+        video_dir = output_dir / "videos" / run_tag
         video_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        video_dir = None
+
+    _write_eval_md(
+        eval_md_path,
+        {
+            "run_tag": run_tag,
+            "load_run": args_cli.load_run,
+            "checkpoint": args_cli.checkpoint or resume_path,
+            "log_dir": log_dir,
+            "task": args_cli.task,
+            "seed": args_cli.seed,
+            "num_envs": args_cli.num_envs,
+            "eval_steps": args_cli.eval_steps,
+            "output_dir": str(output_dir),
+            "video_dir": str(video_dir) if video_dir else None,
+            "command": eval_command,
+            "video_paths": video_paths,
+        },
+    )
     
     # Evaluate each onomatopoeia
     all_results = []
     interrupted = False
     style_speed_table = load_style_speed_table(args_cli.style_speed_table, base_cmd_default)
+    joint_weights = parse_joint_weights(args_cli.hoyo_joint_weights, HOYO_JOINT_NAMES)
+    hoyo_rng = random.Random(args_cli.hoyo_seed)
+    h1_latent_store = None
+    h1_label_list = list(ONOMATOPOEIA_LIST)
+    h1_label_to_idx = {lab: i for i, lab in enumerate(h1_label_list)}
+    if args_cli.dump_h1_latents:
+        h1_latent_store = {"z": [], "labels_idx": [], "counts": defaultdict(int)}
 
     print("\n" + "="*60)
     print("STYLE EVALUATION PER ONOMATOPOEIA")
@@ -1223,6 +2061,9 @@ def main():
         print(f"[INFO] base_velocity_default={base_cmd_default}")
         if effective_base_velocity_mode == "style_table":
             print(f"[INFO] style_speed_table entries={len(style_speed_table)}")
+    print(f"[INFO] z_cos_source={args_cli.z_cos_source}")
+    if args_cli.z_cos_ref_shift_sweep and args_cli.z_cos_source == "training":
+        print("[INFO] z_cos_ref_shift_sweep uses training-style H1 buffer shift vs fixed teacher latent.")
     
     try:
         for onomatopoeia in styles_to_eval:
@@ -1233,8 +2074,15 @@ def main():
             if args_cli.video:
                 # Use safe filename (replace problematic characters)
                 safe_name = onomatopoeia.replace("/", "_").replace("\\", "_")
-                video_path = str(video_dir / f"{timestamp}_{safe_name}.mp4")
+                video_path = str(video_dir / f"{timestamp}_{run_tag}_{safe_name}.mp4")
+                video_paths.append(video_path)
             
+            h1_label_idx = None
+            if args_cli.dump_h1_latents:
+                h1_label_idx = h1_label_to_idx.get(onomatopoeia, None)
+                if h1_label_idx is None:
+                    print(f"[WARN] H1 latent dump skipped (unknown label): {onomatopoeia}")
+
             summary, raw_metrics, hoyo_2d_history = evaluate_onomatopoeia(
                 env, policy, onomatopoeia, 
                 num_steps=args_cli.eval_steps if not args_cli.video else args_cli.video_length,
@@ -1242,17 +2090,34 @@ def main():
                 record_video=args_cli.video,
                 video_path=video_path,
                 teacher_cache=teacher_cache,
+                compute_hoyo_error=compute_hoyo_error,
                 hoyo_metric=args_cli.hoyo_metric,
                 hoyo_eval_interval=args_cli.hoyo_eval_interval,
                 hoyo_dtw_band=args_cli.hoyo_dtw_band,
+                hoyo_dtw_shift_stride=args_cli.hoyo_dtw_shift_stride,
                 hoyo_apply_yaw_correction=hoyo_apply_yaw_correction,
                 base_velocity_mode=effective_base_velocity_mode,
                 base_cmd_default=base_cmd_default,
                 style_speed_table=style_speed_table,
                 style_cache=style_cache,
+                joint_weights=joint_weights,
+                hoyo_rng=hoyo_rng,
+                similarity_mode=args_cli.similarity_mode,
+                z_cos_shift_stride=args_cli.z_cos_shift_stride,
+                z_cos_source=args_cli.z_cos_source,
+                z_cos_ref_shift_sweep=args_cli.z_cos_ref_shift_sweep,
+                z_cos_ref_shift_stride=args_cli.z_cos_ref_shift_stride,
+                debug_reward_keys=args_cli.debug_reward_keys,
                 debug_quat=args_cli.debug_quat,
                 debug_dones=args_cli.debug_dones,
+                hoyo_coord_mode=args_cli.hoyo_coord_mode,
                 collect_hoyo_2d=args_cli.save_hoyo_gif or args_cli.save_hoyo_comparison_gif,
+                collect_h1_latents=args_cli.dump_h1_latents,
+                h1_latents_interval=args_cli.h1_latents_interval,
+                h1_latents_envs=args_cli.h1_latents_envs,
+                h1_latents_max_per_style=args_cli.h1_latents_max_per_style,
+                h1_latent_store=h1_latent_store,
+                h1_label_idx=h1_label_idx,
             )
             
             # Save HOYO GIF if requested
@@ -1322,12 +2187,62 @@ def main():
             print(f"  Mean Angular Vel Z: {summary['mean_angular_vel_z']:.3f}")
             print(f"  Mean Roll: {summary['mean_roll']:.4f}")
             print(f"  Mean Pitch: {summary['mean_pitch']:.4f}")
-            print(f"  Mean Text Sim: {summary['mean_text_sim']:.4f}")
-            print(f"  Mean Teacher Motion Sim: {summary['mean_teacher_motion_sim']:.4f}")
+            if args_cli.similarity_mode in ("teacher", "both") or args_cli.z_cos_source == "training":
+                if summary.get("mean_text_sim") is not None:
+                    print(f"  Mean Text Sim: {summary['mean_text_sim']:.4f}")
+                if summary.get("mean_teacher_motion_sim") is not None:
+                    print(f"  Mean Teacher Motion Sim: {summary['mean_teacher_motion_sim']:.4f}")
+            if args_cli.z_cos_source == "training":
+                if summary.get("mean_teacher_motion_sim") is not None:
+                    std_val = summary.get("std_teacher_motion_sim")
+                    max_val = summary.get("max_teacher_motion_sim")
+                    std_str = f"{std_val:.4f}" if std_val is not None else "n/a"
+                    max_str = f"{max_val:.4f}" if max_val is not None else "n/a"
+                    print(f"  Mean Z Cos (training): {summary['mean_teacher_motion_sim']:.4f} (std={std_str}, max={max_str})")
+            if args_cli.z_cos_ref_shift_sweep and summary.get("z_cos_ref_shift_sweep"):
+                mean_shift0 = summary.get("mean_z_cos_ref_shift0")
+                std_shift0 = summary.get("std_z_cos_ref_shift0")
+                if mean_shift0 is not None:
+                    std_str = f"{std_shift0:.4f}" if std_shift0 is not None else "n/a"
+                    print(f"  Mean Z Cos (shift0): {mean_shift0:.4f} (std={std_str})")
+                sweep_str = " ".join(
+                    f"{entry['shift']}:{entry['mean']:.4f}"
+                    for entry in summary.get("z_cos_ref_shift_sweep", [])
+                )
+                if sweep_str:
+                    sweep_label = "h1 shift" if args_cli.z_cos_source == "training" else "ref shift"
+                    print(f"  ZCos Sweep ({sweep_label}): {sweep_str}")
+            elif args_cli.similarity_mode in ("motionclip", "both") and summary.get("mean_z_cos_best") is not None:
+                print(
+                    f"  Mean Z Cos (best): {summary['mean_z_cos_best']:.4f} "
+                    f"(std={summary['std_z_cos_best']:.4f}, max={summary['max_z_cos_best']:.4f})"
+                )
             print(f"  Mean Episode Length: {summary['mean_episode_length']:.1f}")
             print(f"  Fall Rate: {summary['fall_rate']:.3f} ({summary['fall_count']}/{summary['episode_count']})")
-            if summary["mean_hoyo_error"] is not None:
-                print(f"  Mean HOYO Error: {summary['mean_hoyo_error']:.4f} (std={summary['std_hoyo_error']:.4f})")
+            if compute_hoyo_error and summary["mean_hoyo_error"] is not None:
+                msg = f"  Mean HOYO Error (mean): {summary['mean_hoyo_error']:.4f} (std={summary['std_hoyo_error']:.4f})"
+                if summary.get("mean_hoyo_error_min") is not None:
+                    msg += f" | min={summary['mean_hoyo_error_min']:.4f}"
+                print(msg)
+            if compute_hoyo_error and summary.get("mean_weighted_joint_error_fixed") is not None:
+                print(
+                    f"  Mean Weighted Joint Error (fixed L2): {summary['mean_weighted_joint_error_fixed']:.4f} "
+                    f"(std={summary['std_weighted_joint_error_fixed']:.4f})"
+                )
+            if compute_hoyo_error and summary.get("mean_weighted_joint_error_shift") is not None:
+                print(
+                    f"  Mean Weighted Joint Error (shift L2): {summary['mean_weighted_joint_error_shift']:.4f} "
+                    f"(std={summary['std_weighted_joint_error_shift']:.4f})"
+                )
+            if compute_hoyo_error and summary.get("mean_weighted_joint_error_dtw") is not None:
+                print(
+                    f"  Mean Weighted Joint Error (DTW): {summary['mean_weighted_joint_error_dtw']:.4f} "
+                    f"(std={summary['std_weighted_joint_error_dtw']:.4f})"
+                )
+            if summary.get("ratio_style_reward_sumabs") is not None:
+                print(f"  Style Reward Ratio (sumabs): {summary['ratio_style_reward_sumabs']:.4f}")
+            if summary.get("ratio_style_reward_total") is not None:
+                print(f"  Style Reward Ratio (total): {summary['ratio_style_reward_total']:.4f}")
     except KeyboardInterrupt:
         interrupted = True
         print("\n[INFO] Ctrl+C detected. Stopping evaluation early...")
@@ -1346,22 +2261,79 @@ def main():
             print(f"[WARN] Failed to save CSV: {exc}")
     else:
         print("\n[INFO] No results to save (evaluation interrupted before any episode completed).")
+
+    # Save H1 latents for visualization (if requested)
+    if args_cli.dump_h1_latents and h1_latent_store is not None:
+        if h1_latent_store["z"]:
+            z_h1 = np.stack(h1_latent_store["z"], axis=0)
+            labels_idx = np.asarray(h1_latent_store["labels_idx"], dtype=int)
+            out_path = Path(args_cli.h1_latents_out) if args_cli.h1_latents_out else (output_dir / f"h1_latents_{timestamp}.npz")
+            meta = {
+                "styles": list(styles_to_eval),
+                "interval": args_cli.h1_latents_interval,
+                "envs": args_cli.h1_latents_envs,
+                "max_per_style": args_cli.h1_latents_max_per_style,
+            }
+            np.savez(
+                out_path,
+                z_h1=z_h1,
+                labels_idx=labels_idx,
+                label_list=np.asarray(h1_label_list, dtype=object),
+                style_list=np.asarray(list(styles_to_eval), dtype=object),
+                meta_json=json.dumps(meta, ensure_ascii=False),
+            )
+            print(f"[INFO] H1 latents saved to: {out_path} (N={z_h1.shape[0]})")
+        else:
+            print("[WARN] dump_h1_latents enabled but no H1 latents were collected.")
     
     if args_cli.video and all_results:
         print(f"[INFO] Videos saved to: {video_dir}")
+    if eval_md_path is not None:
+        _write_eval_md(
+            eval_md_path,
+            {
+                "run_tag": run_tag,
+                "load_run": args_cli.load_run,
+                "checkpoint": args_cli.checkpoint or resume_path,
+                "log_dir": log_dir,
+                "task": args_cli.task,
+                "seed": args_cli.seed,
+                "num_envs": args_cli.num_envs,
+                "eval_steps": args_cli.eval_steps,
+                "output_dir": str(output_dir),
+                "video_dir": str(video_dir) if video_dir else None,
+                "command": eval_command,
+                "video_paths": video_paths,
+            },
+        )
     
     # Print summary table if we have data
     if all_results:
         print("\n" + "="*80)
         print("SUMMARY TABLE")
         print("="*80)
-        print(f"{'Onomatopoeia':<15} {'Vel X':>8} {'Cmd X':>8} {'AngVel Z':>10} {'Roll':>8} {'Pitch':>8} {'TextSim':>10} {'CentrSim':>10}")
-        print("-"*80)
+        print(
+            f"{'Onomatopoeia':<15} {'Vel X':>8} {'Cmd X':>8} {'AngVel Z':>10} "
+            f"{'Roll':>8} {'Pitch':>8} {'TextSim':>10} {'CentrSim':>10} "
+            f"{'ZCos':>10} {'JErr(DTW)':>10}"
+        )
+        print("-"*100)
         for r in all_results:
             cmd_x = r.get("mean_cmd_lin_vel_x")
             cmd_x_str = f"{cmd_x:>8.3f}" if cmd_x is not None else f"{'n/a':>8}"
-            print(f"{r['onomatopoeia']:<15} {r['mean_velocity_x']:>8.3f} {cmd_x_str} {r['mean_angular_vel_z']:>10.3f} "
-                  f"{r['mean_roll']:>8.4f} {r['mean_pitch']:>8.4f} {r['mean_text_sim']:>10.4f} {r['mean_teacher_motion_sim']:>10.4f}")
+            z_cos = r.get("mean_z_cos")
+            z_cos_str = f"{z_cos:>10.4f}" if z_cos is not None else f"{'n/a':>10}"
+            joint_err = r.get("mean_weighted_joint_error_dtw")
+            joint_err_str = f"{joint_err:>10.4f}" if joint_err is not None else f"{'n/a':>10}"
+            text_sim = r.get("mean_text_sim")
+            text_sim_str = f"{text_sim:>10.4f}" if text_sim is not None else f"{'n/a':>10}"
+            teacher_sim = r.get("mean_teacher_motion_sim")
+            teacher_sim_str = f"{teacher_sim:>10.4f}" if teacher_sim is not None else f"{'n/a':>10}"
+            print(
+                f"{r['onomatopoeia']:<15} {r['mean_velocity_x']:>8.3f} {cmd_x_str} {r['mean_angular_vel_z']:>10.3f} "
+                f"{r['mean_roll']:>8.4f} {r['mean_pitch']:>8.4f} {text_sim_str} "
+                f"{teacher_sim_str} {z_cos_str} {joint_err_str}"
+            )
     
     # Close environment
     env.close()

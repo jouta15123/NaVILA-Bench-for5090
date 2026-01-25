@@ -18,8 +18,8 @@ _LOG_EVERY_N_STEPS = 10  # Log every N steps to avoid overhead
 def style_reward(
     env: ManagerBasedRLEnv,
     command_name: str,
-    beta_text: float = 0.5,
-    beta_teacher_motion: float = 0.5,
+    beta_text: float = 0.0,
+    beta_teacher_motion: float = 1.0,
     beta_centroid: float | None = None,
     ramp_steps: int = 0,
 ) -> torch.Tensor:
@@ -111,14 +111,98 @@ def style_reward(
         log_counter = 0
     if WANDB_AVAILABLE and wandb.run is not None and log_counter % _LOG_EVERY_N_STEPS == 0:
         try:
-            wandb.log({
+            step_env = getattr(env, "common_step_counter", None)
+            log_payload = {
                 "debug/style_text_sim": r_text.mean().item(),
                 "debug/style_teacher_motion_sim": r_teacher_motion.mean().item(),
                 "debug/style_reward_raw": reward_raw.mean().item(),
                 "debug/style_reward_scaled": reward.mean().item(),
                 "debug/style_reward_min": reward.min().item(),
                 "debug/style_reward_max": reward.max().item(),
-            }, commit=False)
+            }
+
+            # Per-onomatopoeia logging
+            if hasattr(cmd_gen, "current_texts"):
+                current_texts = cmd_gen.current_texts
+                r_text_values = r_text
+                r_teacher_values = r_teacher_motion
+                reward_raw_values = reward_raw
+                reward_scaled_values = reward
+                if r_text_values.dim() != 1:
+                    r_text_values = r_text_values.view(-1)
+                if r_teacher_values.dim() != 1:
+                    r_teacher_values = r_teacher_values.view(-1)
+                if reward_raw_values.dim() != 1:
+                    reward_raw_values = reward_raw_values.view(-1)
+                if reward_scaled_values.dim() != 1:
+                    reward_scaled_values = reward_scaled_values.view(-1)
+
+                label_logged = False
+                if hasattr(cmd_gen, "current_label_ids") and hasattr(cmd_gen, "style_module"):
+                    label_list = getattr(cmd_gen.style_module, "label_list", None)
+                    label_ids = cmd_gen.current_label_ids
+                    if isinstance(label_ids, torch.Tensor):
+                        label_ids_tensor = label_ids.to(device=r_text_values.device, dtype=torch.long).view(-1)
+                    elif isinstance(label_ids, (list, tuple)) and len(label_ids) == r_text_values.numel():
+                        label_ids_tensor = torch.tensor(label_ids, device=r_text_values.device, dtype=torch.long)
+                    else:
+                        label_ids_tensor = None
+
+                    if label_ids_tensor is not None and label_list:
+                        normalized_labels = [str(label).strip() for label in label_list]
+                        for label_id, label_name in enumerate(normalized_labels):
+                            if not label_name:
+                                continue
+                            mask = label_ids_tensor == int(label_id)
+                            if not mask.any():
+                                continue
+                            log_payload[f"debug/style_text_sim/{label_name}"] = r_text_values[mask].mean().item()
+                            log_payload[f"debug/style_teacher_motion_sim/{label_name}"] = r_teacher_values[mask].mean().item()
+                            log_payload[f"debug/style_reward_raw/{label_name}"] = reward_raw_values[mask].mean().item()
+                            log_payload[f"debug/style_reward_scaled/{label_name}"] = reward_scaled_values[mask].mean().item()
+                            log_payload[f"style/text_sim/{label_name}"] = r_text_values[mask].mean().item()
+                            log_payload[f"style/teacher_motion_sim/{label_name}"] = r_teacher_values[mask].mean().item()
+                            log_payload[f"style/label_count/{label_name}"] = float(mask.sum().item())
+                            label_logged = True
+
+                if not label_logged and isinstance(current_texts, (list, tuple)) and len(current_texts) == r_text_values.numel():
+                    cfg_styles = getattr(getattr(cmd_gen, "cfg", None), "styles", None)
+                    if cfg_styles:
+                        styles = [str(style).strip() for style in list(cfg_styles)]
+                    elif hasattr(cmd_gen, "style_module") and getattr(cmd_gen.style_module, "label_list", None):
+                        styles = [str(style).strip() for style in list(cmd_gen.style_module.label_list)]
+                    else:
+                        styles = list(dict.fromkeys([str(text).strip() for text in current_texts]))
+
+                    for style in styles:
+                        if not style:
+                            continue
+                        mask_list = [text == style for text in current_texts]
+                        if not any(mask_list):
+                            continue
+                        mask = torch.tensor(mask_list, device=r_text_values.device, dtype=torch.bool)
+                        log_payload[f"debug/style_text_sim/{style}"] = r_text_values[mask].mean().item()
+                        log_payload[f"debug/style_teacher_motion_sim/{style}"] = r_teacher_values[mask].mean().item()
+                        log_payload[f"debug/style_reward_raw/{style}"] = reward_raw_values[mask].mean().item()
+                        log_payload[f"debug/style_reward_scaled/{style}"] = reward_scaled_values[mask].mean().item()
+                        log_payload[f"style/text_sim/{style}"] = r_text_values[mask].mean().item()
+                        log_payload[f"style/teacher_motion_sim/{style}"] = r_teacher_values[mask].mean().item()
+                        log_payload[f"style/label_count/{style}"] = float(mask.sum().item())
+
+            if step_env is not None:
+                log_payload["style/step_env"] = float(step_env)
+                if hasattr(env, "extras") and not env.extras.get("_wandb_style_metric_defined", False):
+                    try:
+                        wandb.define_metric("style/*", step_metric="style/step_env")
+                    except Exception:
+                        pass
+                    env.extras["_wandb_style_metric_defined"] = True
+
+            current_step = getattr(wandb.run, "step", None)
+            if current_step is not None:
+                wandb.log(log_payload, step=int(current_step))
+            else:
+                wandb.log(log_payload)
         except Exception:
             pass  # Silently fail if wandb logging fails
 

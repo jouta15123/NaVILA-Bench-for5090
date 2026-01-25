@@ -321,7 +321,7 @@ class CustomH1Rewards(H1Rewards):
     style_tracking = RewTerm(
         func=mdp.style_reward,
         weight=0.5,
-        params={"command_name": "style_command", "beta_text": 0.5, "beta_teacher_motion": 0.5, "ramp_steps": 5000},
+        params={"command_name": "style_command", "beta_text": 0.0, "beta_teacher_motion": 1.0, "ramp_steps": 5000},
     )
 
 ##
