@@ -647,10 +647,14 @@ def train_joint(
     eval_retrieval: bool = True,
     eval_silhouette: bool = True,
     best_metric: str = "acc@1",
+    init_ckpt_dir: Path | None = None,
 ):
     os.makedirs(out_dir, exist_ok=True)
     ckpt_dir = out_dir / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+    init_ckpt_dir = init_ckpt_dir or ckpt_dir
+    if init_ckpt_dir != ckpt_dir:
+        print(f"[Init] Loading checkpoints from: {init_ckpt_dir}")
     
     # Projector for semantics -> motion latent space
     # MotionCLIP latent dim is 512 (default)
@@ -661,10 +665,10 @@ def train_joint(
     logit_scale = nn.Parameter(torch.ones([]) * np.log(1.0 / temp))
 
     # Optionally initialize from previous stage checkpoints (e.g., freeze -> encoder -> full)
-    sem_proj_ckpt = ckpt_dir / "sem_proj_joint_best.pth"
-    logit_scale_ckpt = ckpt_dir / "logit_scale_joint_best.pt"
-    encoder_ckpt = ckpt_dir / "motionclip_encoder_joint_best.pth"
-    full_model_ckpt = ckpt_dir / "motionclip_full_joint_best.pth"
+    sem_proj_ckpt = init_ckpt_dir / "sem_proj_joint_best.pth"
+    logit_scale_ckpt = init_ckpt_dir / "logit_scale_joint_best.pt"
+    encoder_ckpt = init_ckpt_dir / "motionclip_encoder_joint_best.pth"
+    full_model_ckpt = init_ckpt_dir / "motionclip_full_joint_best.pth"
     
     if stage in ("encoder", "full"):
         # sem_proj と logit_scale をロード
@@ -1091,6 +1095,12 @@ def train_joint(
                 score = 0.5 * (
                     retrieval["m2t"].get("R@1", 0.0) + retrieval["t2m"].get("R@1", 0.0)
                 )
+            elif best_metric_name == "silhouette":
+                if retrieval is None:
+                    raise RuntimeError("best_metric=silhouette requires retrieval evaluation.")
+                if retrieval["silhouette"] is None:
+                    raise RuntimeError("best_metric=silhouette requires a valid silhouette score.")
+                score = retrieval["silhouette"]
             else:
                 raise ValueError(f"Unknown best_metric '{best_metric_name}'")
 
@@ -1106,7 +1116,8 @@ def train_joint(
                 evals_since_best += 1
 
             if scheduler_type == "plateau" and scheduler is not None:
-                scheduler.step(test_acc)
+                # Use the same metric as best-model selection for LR scheduling.
+                scheduler.step(score)
 
             if early_stop_patience > 0 and evals_since_best >= early_stop_patience:
                 print(f"Early stopping triggered after {evals_since_best} evals without improvement.")
@@ -1195,6 +1206,12 @@ def parse_args():
     parser.add_argument("--wandb-group", type=str, default=None, help="W&B group name")
     parser.add_argument("--run-name", type=str, default=None, help="Optional name for the run directory")
     parser.add_argument(
+        "--init-from-run",
+        type=str,
+        default="",
+        help="Run name to initialize stage=encoder/full from (loads its checkpoints/).",
+    )
+    parser.add_argument(
         "--snapshot-splits",
         type=str,
         default="test",
@@ -1255,9 +1272,9 @@ def parse_args():
     )
     parser.add_argument(
         "--best-metric",
-        choices=["acc@1", "m2t_r@1", "t2m_r@1", "avg_r@1"],
+        choices=["acc@1", "m2t_r@1", "t2m_r@1", "avg_r@1", "silhouette"],
         default="acc@1",
-        help="Metric used to select the best checkpoint.",
+        help="Metric used to select the best checkpoint (supports silhouette).",
     )
     parser.add_argument(
         "--target-len",
@@ -1289,6 +1306,10 @@ def main():
 
     if args.best_metric != "acc@1" and args.no_retrieval_eval:
         raise ValueError("best_metric requires retrieval evaluation; do not use --no-retrieval-eval.")
+    if args.best_metric == "silhouette" and args.no_silhouette:
+        raise ValueError("best_metric=silhouette requires silhouette computation; do not use --no-silhouette.")
+    if args.best_metric == "silhouette" and silhouette_score is None:
+        raise RuntimeError("best_metric=silhouette requires scikit-learn (silhouette_score).")
 
     hoyo_root = HOYO_ROOT
     if args.run_name:
@@ -1300,6 +1321,12 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     logs_dir = out_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    init_ckpt_dir = None
+    if args.init_from_run:
+        init_ckpt_dir = hoyo_root / "joint_training_results" / args.init_from_run / "checkpoints"
+        if not init_ckpt_dir.exists():
+            raise FileNotFoundError(f"--init-from-run checkpoints not found: {init_ckpt_dir}")
 
     # ------------------------------------------------------------------
     # Set up logging: tee stdout/stderr to a timestamped log file
@@ -1451,6 +1478,7 @@ def main():
             eval_retrieval=not args.no_retrieval_eval,
             eval_silhouette=not args.no_silhouette,
             best_metric=args.best_metric,
+            init_ckpt_dir=init_ckpt_dir,
         )
     finally:
         if wandb_run is not None:

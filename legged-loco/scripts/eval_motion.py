@@ -117,6 +117,13 @@ parser.add_argument("--log_root", type=str, default=None, help="Log root directo
 parser.add_argument("--use_log_env", action="store_true", default=True)
 parser.add_argument("--no_base_policy", action="store_true", default=False)
 parser.add_argument("--style_list", type=str, default=None, help="Comma-separated styles to evaluate")
+parser.add_argument(
+    "--terrain",
+    type=str,
+    default="rough",
+    choices=["rough", "flat", "plane"],
+    help="Terrain type for evaluation (default: rough). Use flat/plane for a flat ground plane.",
+)
 # Policy arguments (required by cli_args.parse_rsl_rl_cfg)
 parser.add_argument("--use_cnn", action="store_true", default=None)
 parser.add_argument("--use_rnn", action="store_true", default=False)
@@ -212,6 +219,7 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+NORMAL_STYLE_LABEL_CANDIDATES = ("通常", "normal", "Normal")
 
 
 # =============================================================================
@@ -278,6 +286,8 @@ class MotionMetrics:
     cos_centroid: list[float] = field(default_factory=list)
     # cos類似度: H1 motion embedding vs ランダムサンプル (latent_snapshotから)
     cos_random_sample: list[float] = field(default_factory=list)
+    # 相対スタイル指標: cos(H1, teacher_style) - cos(H1, teacher_normal)
+    style_score: list[float] = field(default_factory=list)
     # 時間シフト解析結果: {shift_amount: [cos_values]}
     cos_time_shift: dict[int, list[float]] = field(default_factory=dict)
     joint_error: list[float] = field(default_factory=list)
@@ -305,6 +315,9 @@ class EvaluationResult:
     # Similarity (H1 vs random sample - latent_snapshotからランダム選択)
     mean_cos_random_sample: float | None
     std_cos_random_sample: float | None
+    # Relative style score (teacher style - teacher normal)
+    mean_style_score: float | None
+    std_style_score: float | None
     # Joint error
     mean_joint_error: float | None
     std_joint_error: float | None
@@ -335,6 +348,8 @@ class EvaluationResult:
             "std_cos_centroid": self.std_cos_centroid,
             "mean_cos_random_sample": self.mean_cos_random_sample,
             "std_cos_random_sample": self.std_cos_random_sample,
+            "mean_style_score": self.mean_style_score,
+            "std_style_score": self.std_style_score,
             "mean_joint_error": self.mean_joint_error,
             "std_joint_error": self.std_joint_error,
             "mean_joint_error_dtw": self.mean_joint_error_dtw,
@@ -699,6 +714,18 @@ class EvalEnvWrapper:
             return None
         return self._style_gen.teacher_motion_latents
 
+    def get_teacher_embedding_for_style(self, onomatopoeia: str) -> torch.Tensor | None:
+        """指定スタイルの教師motion embedding を取得."""
+        if onomatopoeia in self._style_cache:
+            return self._style_cache[onomatopoeia][1]
+        if self._style_gen is None or not hasattr(self._style_gen, "style_module"):
+            return None
+        z_onm, teacher_motion = self._style_gen.style_module.encode_instruction(onomatopoeia)
+        z_onm = z_onm.squeeze(0)
+        teacher_motion = teacher_motion.squeeze(0)
+        self._style_cache[onomatopoeia] = (z_onm, teacher_motion)
+        return teacher_motion
+
     def get_current_motion_embedding(self) -> torch.Tensor | None:
         """現在のH1 motion embeddingを取得."""
         if self._style_gen is None or not hasattr(self._style_gen, "style_module"):
@@ -951,6 +978,14 @@ def evaluate_single_style(
     # 事前にセントロイドとランダムサンプルのembeddingを取得
     centroid_emb = env_wrapper.get_centroid_embedding(onomatopoeia)
     random_sample_emb = env_wrapper.get_random_sample_embedding(onomatopoeia, rng=random.Random(42))
+    teacher_style_emb = env_wrapper.get_teacher_embedding_for_style(onomatopoeia)
+    normal_teacher_emb = None
+    normal_label = None
+    for candidate in NORMAL_STYLE_LABEL_CANDIDATES:
+        normal_teacher_emb = env_wrapper.get_teacher_embedding_for_style(candidate)
+        if normal_teacher_emb is not None:
+            normal_label = candidate
+            break
     
     # デバイス統一 (GPU/CPU不一致対策)
     device = env_wrapper.device
@@ -960,6 +995,15 @@ def evaluate_single_style(
     if random_sample_emb is not None:
         random_sample_emb = random_sample_emb.to(device)
         print(f"    [INFO] Random sample embedding loaded for {onomatopoeia}")
+    if teacher_style_emb is not None:
+        teacher_style_emb = teacher_style_emb.to(device)
+    if normal_teacher_emb is not None:
+        normal_teacher_emb = normal_teacher_emb.to(device)
+    if teacher_style_emb is None or normal_teacher_emb is None:
+        logger.warning(
+            "Style score disabled: teacher embedding missing "
+            f"(style={onomatopoeia}, normal={normal_label or 'N/A'})."
+        )
 
     # Video recorder
     recorder = None
@@ -1072,6 +1116,13 @@ def evaluate_single_style(
                             for i in range(min(env_wrapper.num_envs, motion_emb.shape[0])):
                                 sim = compute_cosine_similarity(motion_emb[i], random_sample_emb)
                                 metrics.cos_random_sample.append(sim)
+
+                        # 2.5 相対スタイル指標 (教師スタイル - 教師通常)
+                        if teacher_style_emb is not None and normal_teacher_emb is not None:
+                            for i in range(min(env_wrapper.num_envs, motion_emb.shape[0])):
+                                sim_style = compute_cosine_similarity(motion_emb[i], teacher_style_emb)
+                                sim_normal = compute_cosine_similarity(motion_emb[i], normal_teacher_emb)
+                                metrics.style_score.append(sim_style - sim_normal)
                         
                         # 3. 時間シフト解析 (オプション) - スライディングウィンドウ方式
                         if config.time_shift_analyze and random_sample_emb is not None:
@@ -1181,6 +1232,8 @@ def evaluate_single_style(
         std_cos_centroid=float(np.std(metrics.cos_centroid)) if metrics.cos_centroid else None,
         mean_cos_random_sample=float(np.mean(metrics.cos_random_sample)) if metrics.cos_random_sample else None,
         std_cos_random_sample=float(np.std(metrics.cos_random_sample)) if metrics.cos_random_sample else None,
+        mean_style_score=float(np.mean(metrics.style_score)) if metrics.style_score else None,
+        std_style_score=float(np.std(metrics.style_score)) if metrics.style_score else None,
         mean_joint_error=float(np.mean(metrics.joint_error)) if metrics.joint_error else None,
         std_joint_error=float(np.std(metrics.joint_error)) if metrics.joint_error else None,
         mean_joint_error_dtw=float(np.mean(metrics.joint_error_dtw)) if metrics.joint_error_dtw else None,
@@ -1231,11 +1284,18 @@ def load_hoyo_reference(
         # 正規化統計を適用（あれば）
         if stats_path and stats_path.exists():
             apply_normalization_from_stats(dataset, stats_path)
+            logger.info(f"Applied normalization stats from: {stats_path}")
         else:
-            # デフォルトのパスを試す
-            default_stats = hoyo_root / "data" / "normalization_stats.json"
-            if default_stats.exists():
-                apply_normalization_from_stats(dataset, default_stats)
+            # デフォルトのパスを試す（優先順位順）
+            candidates = [
+                hoyo_root / "joint_training_results" / "normalization_stats.json",
+                hoyo_root / "data" / "normalization_stats.json",
+            ]
+            for candidate in candidates:
+                if candidate.exists():
+                    apply_normalization_from_stats(dataset, candidate)
+                    logger.info(f"Applied normalization stats from: {candidate}")
+                    break
         
         if len(dataset) == 0:
             logger.debug(f"No samples found for label: {label}")
@@ -1331,6 +1391,18 @@ def main():
     # Disable terrain curriculum
     if hasattr(env_cfg, "curriculum") and hasattr(env_cfg.curriculum, "terrain_levels"):
         env_cfg.curriculum.terrain_levels = None
+
+    # Terrain override (flat/plane)
+    if args_cli.terrain in ("flat", "plane"):
+        terrain_cfg = getattr(getattr(env_cfg, "scene", None), "terrain", None)
+        if terrain_cfg is None:
+            logger.warning("Terrain override requested but env_cfg.scene.terrain is not available.")
+        else:
+            terrain_cfg.terrain_type = "plane"
+            terrain_cfg.terrain_generator = None
+            if getattr(terrain_cfg, "env_spacing", None) is None:
+                terrain_cfg.env_spacing = getattr(env_cfg.scene, "env_spacing", 2.5)
+            logger.info("Using plane terrain for evaluation.")
 
     # Reset function override
     if hasattr(env_cfg, "events") and hasattr(env_cfg.events, "reset_base"):
@@ -1442,6 +1514,8 @@ def main():
             print(f"    cos_centroid (H1 vs Centroid): {result.mean_cos_centroid:.4f}")
         if result.mean_cos_random_sample is not None:
             print(f"    cos_random_sample (H1 vs Random): {result.mean_cos_random_sample:.4f}")
+        if result.mean_style_score is not None:
+            print(f"    style_score (teacher - normal): {result.mean_style_score:.4f} ± {result.std_style_score:.4f}")
         if result.mean_joint_error is not None:
             print(f"    mean_joint_error (L2): {result.mean_joint_error:.4f}")
         if result.mean_joint_error_dtw is not None:
@@ -1459,23 +1533,24 @@ def main():
 
     # Print final summary table
     print("")
-    print("=" * 100)
+    print("=" * 108)
     print("EVALUATION SUMMARY")
     print(f"Command: lin_vel_x={config.lin_vel_x}, lin_vel_y={config.lin_vel_y}, ang_vel_z={config.ang_vel_z}")
-    print("=" * 100)
-    print(f"{'Onomatopoeia':<12} {'Cmd X':>6} {'Vel X':>8} {'Cos(C)':>8} {'Cos(R)':>8} {'L2 Err':>8} {'DTW Err':>8} {'Fall%':>8}")
-    print("-" * 100)
+    print("=" * 108)
+    print(f"{'Onomatopoeia':<12} {'Cmd X':>6} {'Vel X':>8} {'Style':>8} {'Cos(C)':>8} {'Cos(R)':>8} {'L2 Err':>8} {'DTW Err':>8} {'Fall%':>8}")
+    print("-" * 108)
     for r in results:
         cos_c = f"{r.mean_cos_centroid:.3f}" if r.mean_cos_centroid is not None else "N/A"
         cos_r = f"{r.mean_cos_random_sample:.3f}" if r.mean_cos_random_sample is not None else "N/A"
+        style = f"{r.mean_style_score:.3f}" if r.mean_style_score is not None else "N/A"
         j_err = f"{r.mean_joint_error:.4f}" if r.mean_joint_error is not None else "N/A"
         j_dtw = f"{r.mean_joint_error_dtw:.4f}" if r.mean_joint_error_dtw is not None else "N/A"
         print(
             f"{r.onomatopoeia:<12} {config.lin_vel_x:>6.2f} {r.mean_velocity_x:>8.3f} "
-            f"{cos_c:>8} {cos_r:>8} {j_err:>8} {j_dtw:>8} {r.fall_rate:>7.1%}"
+            f"{style:>8} {cos_c:>8} {cos_r:>8} {j_err:>8} {j_dtw:>8} {r.fall_rate:>7.1%}"
         )
-    print("=" * 100)
-    print("Cos(C/R) = embedding similarity, L2/DTW Err = joint error (same unit, DTW=phase-aligned)")
+    print("=" * 108)
+    print("Style = cos(teacher_style) - cos(teacher_normal), Cos(C/R) = embedding similarity, L2/DTW Err = joint error")
     print(f"Results saved to: {output_dir / f'eval_motion_{timestamp}.json'}")
     
     # Print time-shift analysis if available

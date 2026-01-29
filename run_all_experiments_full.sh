@@ -4,8 +4,12 @@ set -e
 cd /home/jouta/NaVILA-Bench
 PYTHON=/home/jouta/venvs/motionclip/bin/python
 
+# W&B settings (override via env if needed)
+WANDB_PROJECT=${WANDB_PROJECT:-supcon_hoyo_main}
+WANDB_GROUP=${WANDB_GROUP:-all_experiments_full}
+
 # 前回うまくいった設定
-COMMON_ARGS="--stage=full --steps=5000 --lr=5e-05 --lr-encoder=2e-05 --lr-decoder=2e-05 --lambda-vae=1.0 --lambda-contrastive=0.5"
+COMMON_ARGS="--stage=full --steps=5000 --lr=5e-05 --lr-encoder=2e-05 --lr-decoder=2e-05 --lambda-vae=1.0 --lambda-contrastive=0.5 --best-metric=avg_r@1 --log-interval=100 --eval-interval=200 --early-stop-patience=0 --wandb --wandb-project=${WANDB_PROJECT} --wandb-group=${WANDB_GROUP}"
 
 echo "=========================================="
 echo "Starting all 4 experiments with stage=full"

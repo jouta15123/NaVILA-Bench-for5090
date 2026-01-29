@@ -177,6 +177,25 @@ STYLE_CENTROID_MODE=random \
 
 ## 評価コマンド
 
+### MotionCLIP 学習後 PCA 可視化（unknown words 付き）
+
+用途:
+- motion latent の分布を PCA 2D で可視化
+- 未知語（学習データ外）を Sarashina + sem_proj で射影して重ね描画
+
+```bash
+python hoyo_v1_1/viz/plot_latent_spaces.py \
+  --snapshot hoyo_v1_1/joint_training_results/sarashina_full_fixed/latent_snapshot_final.npz \
+  --out-dir hoyo_v1_1/joint_training_results/visualizations \
+  --label-mode coarse-with-normal \
+  --unknown-words hoyo_v1_1/data/unknown_words_coarse.txt \
+  --sem-proj hoyo_v1_1/joint_training_results/sarashina_full_fixed/checkpoints/sem_proj_joint_best.pth
+```
+
+補足:
+- `--label-mode coarse-with-normal` で「通常」を独立カテゴリとして表示
+- unknown words は `hoyo_v1_1/data/unknown_words_coarse.txt` を編集すれば反映される
+
 ### オノマトペ別評価
 
 ```bash

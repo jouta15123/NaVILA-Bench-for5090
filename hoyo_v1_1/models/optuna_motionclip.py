@@ -11,6 +11,14 @@ Usage:
         --n-trials 20 \
         --freeze-steps 1000 \
         --min-steps 2000 --max-steps 6000 --step-interval 500
+
+    # Search loss weights as well
+    /home/jouta/venvs/motionclip/bin/python hoyo_v1_1/models/optuna_motionclip.py \
+        --n-trials 20 \
+        --freeze-steps 1000 \
+        --search-lambda \
+        --lambda-contrastive-min 0.3 --lambda-contrastive-max 2.0 \
+        --lambda-vae-min 0.1 --lambda-vae-max 1.0
 """
 
 import argparse
@@ -237,9 +245,20 @@ def objective(trial: optuna.Trial, args) -> float:
     Returns the M→T R@1 (to be maximized).
     """
     # Hyperparameters to search (full stage only)
-    # Fixed values (per user request)
-    lambda_contrastive = args.lambda_contrastive
-    lambda_vae = args.lambda_vae
+    # Optionally search loss weights
+    if args.search_lambda:
+        lambda_vae = trial.suggest_float(
+            "lambda_vae", args.lambda_vae_min, args.lambda_vae_max, log=True
+        )
+        lc_min = max(args.lambda_contrastive_min, lambda_vae)
+        if lc_min > args.lambda_contrastive_max:
+            raise optuna.TrialPruned()
+        lambda_contrastive = trial.suggest_float(
+            "lambda_contrastive", lc_min, args.lambda_contrastive_max, log=True
+        )
+    else:
+        lambda_contrastive = args.lambda_contrastive
+        lambda_vae = args.lambda_vae
 
     # Search ranges
     if args.narrow_search:
@@ -426,6 +445,12 @@ def main():
     parser.add_argument("--resume", action="store_true", help="Resume existing study")
     parser.add_argument("--gpu", type=int, default=None, help="GPU ID to use")
     parser.add_argument("--timeout", type=int, default=3600, help="Timeout per trial (seconds)")
+    parser.add_argument(
+        "--pruner-warmup-steps",
+        type=int,
+        default=1000,
+        help="Warmup steps before pruning starts (MedianPruner).",
+    )
     parser.add_argument("--steps", type=int, default=3000, help="Default full-stage steps per trial")
     parser.add_argument("--min-steps", type=int, default=None, help="Min full-stage steps for search")
     parser.add_argument("--max-steps", type=int, default=None, help="Max full-stage steps for search")
@@ -469,6 +494,35 @@ def main():
         help="Fixed VAE loss weight.",
     )
     parser.add_argument(
+        "--search-lambda",
+        action="store_true",
+        help="Search lambda_contrastive/lambda_vae instead of using fixed values.",
+    )
+    parser.add_argument(
+        "--lambda-contrastive-min",
+        type=float,
+        default=0.1,
+        help="Min lambda_contrastive (when --search-lambda).",
+    )
+    parser.add_argument(
+        "--lambda-contrastive-max",
+        type=float,
+        default=2.0,
+        help="Max lambda_contrastive (when --search-lambda).",
+    )
+    parser.add_argument(
+        "--lambda-vae-min",
+        type=float,
+        default=0.1,
+        help="Min lambda_vae (when --search-lambda).",
+    )
+    parser.add_argument(
+        "--lambda-vae-max",
+        type=float,
+        default=2.0,
+        help="Max lambda_vae (when --search-lambda).",
+    )
+    parser.add_argument(
         "--silhouette-weight",
         type=float,
         default=0.1,
@@ -486,6 +540,16 @@ def main():
     args = parser.parse_args()
     args.run_freeze = not args.no_freeze
 
+    if args.search_lambda:
+        if args.lambda_contrastive_min <= 0 or args.lambda_contrastive_max <= 0:
+            raise ValueError("lambda_contrastive range must be > 0 when --search-lambda is enabled.")
+        if args.lambda_vae_min <= 0 or args.lambda_vae_max <= 0:
+            raise ValueError("lambda_vae range must be > 0 when --search-lambda is enabled.")
+        if args.lambda_contrastive_min > args.lambda_contrastive_max:
+            raise ValueError("lambda_contrastive_min must be <= lambda_contrastive_max.")
+        if args.lambda_vae_min > args.lambda_vae_max:
+            raise ValueError("lambda_vae_min must be <= lambda_vae_max.")
+
     # Verify freeze checkpoint exists (only if not running freeze stage)
     if not args.run_freeze and args.freeze_run:
         freeze_ckpt = RESULTS_DIR / args.freeze_run / "checkpoints"
@@ -497,7 +561,7 @@ def main():
 
     # Create study
     sampler = TPESampler(seed=42)
-    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=1000)
+    pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=args.pruner_warmup_steps)
 
     if args.storage:
         storage = args.storage
@@ -536,6 +600,14 @@ def main():
         print(f"Full steps search: {min_steps}..{max_steps} (interval={args.step_interval})")
     else:
         print(f"Full steps/trial: {args.steps}")
+    if args.search_lambda:
+        print(
+            "Lambda search: "
+            f"lambda_contrastive={args.lambda_contrastive_min}..{args.lambda_contrastive_max}, "
+            f"lambda_vae={args.lambda_vae_min}..{args.lambda_vae_max}"
+        )
+    else:
+        print(f"Lambda fixed: lc={args.lambda_contrastive}, lv={args.lambda_vae}")
     print(f"Timeout: {args.timeout}s")
     print(f"{'='*60}\n")
 

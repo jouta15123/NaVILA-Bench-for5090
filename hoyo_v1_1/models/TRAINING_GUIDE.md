@@ -115,6 +115,40 @@ python train_motionclip_joint.py \
 
 ---
 
+### SupCon-main（分離重視）設定
+
+VAE よりも対照学習の分離を優先したい場合：
+
+```bash
+python train_motionclip_joint.py \
+  --stage full \
+  --steps 4000 \
+  --batch-size 24 \
+  --lr 1e-5 \
+  --lr-encoder 5e-6 \
+  --lr-decoder 5e-6 \
+  --temp 0.07 \
+  --lambda-contrastive 1.0 \
+  --lambda-vae 0.3 \
+  --best-metric silhouette \
+  --label-mode fine \
+  --sem-encoder sarashina \
+  --contrastive-mode supcon \
+  --log-interval 100 \
+  --eval-interval 200 \
+  --run-name full_sarashina_supcon_main \
+  --wandb \
+  --wandb-project hoyo_motion \
+  --wandb-group full_stage_supcon_main
+```
+
+**ポイント:**
+- `--lambda-contrastive 1.0` / `--lambda-vae 0.3` で SupCon を主にする
+- `--best-metric silhouette` を使う場合は `--no-retrieval-eval` / `--no-silhouette` を付けない
+- silhouette 計算には scikit-learn が必要
+
+---
+
 ## その他の推奨設定
 
 ### Coarse Label（4スタイル群）での学習

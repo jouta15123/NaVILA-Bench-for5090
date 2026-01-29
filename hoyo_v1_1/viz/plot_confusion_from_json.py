@@ -36,7 +36,7 @@ def plot_confusion(cm: np.ndarray, labels: list[str], out_path: Path, normalize:
         cm_plot = normalize_rows(cm)
         fmt = ".2f"
     else:
-        cm_plot = cm
+        cm_plot = cm.astype(int)
         fmt = "d"
 
     plt.figure(figsize=(8, 7))
