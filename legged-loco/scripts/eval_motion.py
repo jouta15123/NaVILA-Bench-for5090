@@ -120,9 +120,9 @@ parser.add_argument("--style_list", type=str, default=None, help="Comma-separate
 parser.add_argument(
     "--terrain",
     type=str,
-    default="rough",
+    default="flat",
     choices=["rough", "flat", "plane"],
-    help="Terrain type for evaluation (default: rough). Use flat/plane for a flat ground plane.",
+    help="Terrain type for evaluation (default: flat). Use flat/plane for a flat ground plane.",
 )
 # Policy arguments (required by cli_args.parse_rsl_rl_cfg)
 parser.add_argument("--use_cnn", action="store_true", default=None)
