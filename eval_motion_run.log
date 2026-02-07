@@ -1,0 +1,357 @@
+[3gH    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H    H [INFO] Using python from: /workspace/IsaacLab/_isaac_sim/python.sh
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/workspace/IsaacLab/_isaac_sim/kit/python/lib/python3.10/site-packages/japanize_matplotlib/japanize_matplotlib.py:16: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  is_support_createFontList = LooseVersion(matplotlib.__version__) < '3.2'
+/workspace/IsaacLab/_isaac_sim/kit/python/lib/python3.10/site-packages/setuptools/_distutils/version.py:337: DeprecationWarning: distutils Version classes are deprecated. Use packaging.version instead.
+  other = LooseVersion(other)
+/workspace/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py:42: FutureWarning: In the future `np.bool` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, _name):
+/workspace/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py:42: FutureWarning: In the future `np.object` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, _name):
+/workspace/NaVILA-Bench/hoyo_v1_1/models/train_motionclip_joint.py:42: FutureWarning: In the future `np.str` will be defined as the corresponding NumPy scalar.
+  if not hasattr(np, _name):
+[INFO][AppLauncher]: Loading experience file: /workspace/IsaacLab/apps/isaaclab.python.headless.kit
+[eval_motion debug] main start
+[eval_motion debug] args: task=h1_vision_without_speedinput_exp_c_fixed03 num_envs=1 load_run=2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1 checkpoint=model_2000.pt
+[INFO]: Parsing configuration from: <class 'omni.isaac.leggedloco.config.h1.h1_low_vision_cfg.H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03'>
+[INFO]: Parsing configuration from: <class 'omni.isaac.leggedloco.config.h1.h1_low_vision_cfg.H1VisionRoughPPORunnerCfg'>
+[eval_motion debug] log_root=/workspace/NaVILA-Bench/logs/rsl_rl exists=True
+[eval_motion debug] log_dir=/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1 exists=True
+[eval_motion debug] log_env_cfg_path=/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1/params/env.yaml exists=True
+[eval_motion debug] agent_cfg_path=/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1/params/agent.yaml exists=True
+[eval_motion debug] creating env
+Loading user config located at: '/isaac-sim/kit/data/Kit/Isaac-Sim/4.5/user.config.json'
+[Info] [carb] Logging to file: /isaac-sim/kit/logs/Kit/Isaac-Sim/4.5/kit_20260201_153649.log
+2026-02-01 15:36:49 [0ms] [Warning] [omni.kit.app.plugin] No crash reporter present, dumps uploading isn't available.
+2026-02-01 15:36:49 [220ms] [Warning] [omni.usd_config.extension] Enable omni.materialx.libs extension to use MaterialX
+2026-02-01 15:36:49 [262ms] [Warning] [omni.platforminfo.plugin] failed to open the default display.  Can't verify X Server version.
+2026-02-01 15:36:49 [356ms] [Warning] [omni.datastore] OmniHub is inaccessible
+2026-02-01 15:36:49 [454ms] [Warning] [omni.isaac.dynamic_control] omni.isaac.dynamic_control is deprecated as of Isaac Sim 4.5. No action is needed from end-users.
+
+|---------------------------------------------------------------------------------------------|
+| Driver Version: 570.124.06    | Graphics API: Vulkan
+|=============================================================================================|
+| GPU | Name                             | Active | LDA | GPU Memory | Vendor-ID | LUID       |
+|     |                                  |        |     |            | Device-ID | UUID       |
+|     |                                  |        |     |            | Bus-ID    |            |
+|---------------------------------------------------------------------------------------------|
+| 0   | NVIDIA GeForce RTX 5090          | Yes: 0 |     | 32607   MB | 10de      | 0          |
+|     |                                  |        |     |            | 2b85      | 23b2d92b.. |
+|     |                                  |        |     |            | 1         |            |
+|=============================================================================================|
+| OS: 22.04.5 LTS (Jammy Jellyfish) ubuntu, Version: 22.04.5, Kernel: 6.8.0-90-generic
+| Processor: AMD Ryzen 9 9950X3D 16-Core Processor
+| Cores: 16 | Logical Cores: 32
+|---------------------------------------------------------------------------------------------|
+| Total Memory (MB): 63891 | Free Memory: 56348
+| Total Page/Swap (MB): 2047 | Free Page/Swap: 0
+|---------------------------------------------------------------------------------------------|
+2026-02-01 15:36:51 [2,484ms] [Warning] [gpu.foundation.plugin] IOMMU is enabled.
+2026-02-01 15:36:54 [4,763ms] [Warning] [isaaclab.envs.manager_based_env] Seed not set for the environment. The environment creation may not be deterministic.
+2026-02-01 15:36:54 [4,763ms] [Warning] [isaaclab.sim.simulation_context] The `disable_contact_processing` attribute is deprecated and always set to True to avoid unnecessary overhead. Contact processing is automatically enabled when a contact sensor is created, so manual configuration is no longer required.
+2026-02-01 15:36:54 [4,807ms] [Warning] [isaaclab.terrains.terrain_importer] Visual material specified for ground plane but no diffuse color found. Using default color: (0.0, 0.0, 0.0)
+2026-02-01 15:36:55 [5,856ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'effort_limit'. This parameter will be removed in the future. To set the effort limit, please use 'effort_limit_sim' instead.
+2026-02-01 15:36:55 [5,856ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'velocity_limit'. Previously, although this value was specified, it was not getting used by implicit actuators. Since this parameter affects the simulation behavior, we continue to not use it. This parameter will be removed in the future. To set the velocity limit, please use 'velocity_limit_sim' instead.
+2026-02-01 15:36:55 [5,858ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'effort_limit'. This parameter will be removed in the future. To set the effort limit, please use 'effort_limit_sim' instead.
+2026-02-01 15:36:55 [5,858ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'velocity_limit'. Previously, although this value was specified, it was not getting used by implicit actuators. Since this parameter affects the simulation behavior, we continue to not use it. This parameter will be removed in the future. To set the velocity limit, please use 'velocity_limit_sim' instead.
+2026-02-01 15:36:55 [5,858ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'effort_limit'. This parameter will be removed in the future. To set the effort limit, please use 'effort_limit_sim' instead.
+2026-02-01 15:36:55 [5,858ms] [Warning] [isaaclab.actuators.actuator_pd] The <ImplicitActuatorCfg> object has a value for 'velocity_limit'. Previously, although this value was specified, it was not getting used by implicit actuators. Since this parameter affects the simulation behavior, we continue to not use it. This parameter will be removed in the future. To set the velocity limit, please use 'velocity_limit_sim' instead.
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPreviewSurface.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdUVTexture.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float2.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float3.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_float4.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_int.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_string.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_normal.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_point.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_vector.info:mdl:sourceAsset> with value @UsdPreview/workspace/IsaacLab/_isaac_sim/kit/python/lib/python3.10/site-packages/torch/nn/modules/transformer.py:392: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.self_attn.batch_first was not True(use batch_first for better inference performance)
+  warnings.warn(
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+<frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+[INFO]: Base environment:
+	Environment device    : cuda:0
+	Environment seed      : None
+	Physics step-size     : 0.005
+	Rendering step-size   : 0.02
+	Environment step-size : 0.02
+[INFO]: Time taken for scene creation : 0.856917 seconds
+[INFO]: Scene manager:  <class InteractiveScene>
+	Number of environments: 1
+	Environment spacing   : 2.5
+	Source prim name      : /World/envs/env_0
+	Global prim paths     : ['/World/ground']
+	Replicate physics     : True
+[INFO]: Starting the simulation. This may take a few seconds. Please wait...
+[INFO]: Time taken for simulation start : 0.242877 seconds
+Loaded MotionCLIP (Full). Missing: 4, Unexpected: 0
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  3.58it/s]
+[INFO] Command Manager:  <CommandManager> contains 2 active terms.
++------------------------------------------------+
+|              Active Command Terms              |
++-------+---------------+------------------------+
+| Index | Name          |          Type          |
++-------+---------------+------------------------+
+|   0   | base_velocity | UniformVelocityCommand |
+|   1   | style_command | StyleCommandGenerator  |
++-------+---------------+------------------------+
+
+[INFO] Recorder Manager:  <RecorderManager> contains 0 active terms.
++---------------------+
+| Active Recorder Terms |
++-----------+---------+
+|   Index   | Name    |
++-----------+---------+
++-----------+---------+
+
+[INFO] Action Manager:  <ActionManager> contains 1 active terms.
++------------------------------------+
+|  Active Action Terms (shape: 19)   |
++--------+-------------+-------------+
+| Index  | Name        |   Dimension |
++--------+-------------+-------------+
+|   0    | joint_pos   |          19 |
++--------+-------------+-------------+
+
+[INFO] Observation Manager: <ObservationManager> contains 3 groups.
++----------------------------------------------------------+
+| Active Observation Terms in Group: 'policy' (shape: (768,)) |
++-----------+--------------------------------+-------------+
+|   Index   | Name                           |    Shape    |
++-----------+--------------------------------+-------------+
+|     0     | base_lin_vel                   |     (3,)    |
+|     1     | base_ang_vel                   |     (3,)    |
+|     2     | projected_gravity              |     (3,)    |
+|     3     | velocity_commands              |     (3,)    |
+|     4     | joint_pos                      |    (19,)    |
+|     5     | joint_vel                      |    (19,)    |
+|     6     | actions                        |    (19,)    |
+|     7     | height_scan                    |    (187,)   |
+|     8     | style                          |    (512,)   |
++-----------+--------------------------------+-------------+
++---------------------------------------------------------+
+| Active Observation Terms in Group: 'proprio' (shape: (69,)) |
++-----------+---------------------------------+-----------+
+|   Index   | Name                            |   Shape   |
++-----------+---------------------------------+-----------+
+|     0     | base_lin_vel                    |    (3,)   |
+|     1     | base_ang_vel                    |    (3,)   |
+|     2     | projected_gravity               |    (3,)   |
+|     3     | velocity_commands               |    (3,)   |
+|     4     | joint_pos                       |   (19,)   |
+|     5     | joint_vel                       |   (19,)   |
+|     6     | actions                         |   (19,)   |
++-----------+---------------------------------+-----------+
++----------------------------------------------------------+
+| Active Observation Terms in Group: 'critic' (shape: (768,)) |
++-----------+--------------------------------+-------------+
+|   Index   | Name                           |    Shape    |
++-----------+--------------------------------+-------------+
+|     0     | base_lin_vel                   |     (3,)    |
+|     1     | base_ang_vel                   |     (3,)    |
+|     2     | projected_gravity              |     (3,)    |
+|     3     | velocity_commands              |     (3,)    |
+|     4     | joint_pos                      |    (19,)    |
+|     5     | joint_vel                      |    (19,)    |
+|     6     | actions                        |    (19,)    |
+|     7     | height_scan                    |    (187,)   |
+|     8     | style                          |    (512,)   |
++-----------+--------------------------------+-------------+
+
+[INFO] Event Manager:  <EventManager> contains 2 active terms.
++--------------------------------------+
+| Active Event Terms in Mode: 'startup' |
++----------+---------------------------+
+|  Index   | Name                      |
++----------+---------------------------+
+|    0     | physics_material          |
++----------+---------------------------+
++---------------------------------------+
+|  Active Event Terms in Mode: 'reset'  |
++--------+------------------------------+
+| Index  | Name                         |
++--------+------------------------------+
+|   0    | base_external_force_torque   |
+|   1    | reset_base                   |
+|   2    | reset_robot_joints           |
++--------+------------------------------+
+
+[INFO] Termination Manager:  <TerminationManager> contains 2 active terms.
++---------------------------------+
+|     Active Termination Terms    |
++-------+--------------+----------+
+| Index | Name         | Time Out |
++-------+--------------+----------+
+|   0   | time_out     |   True   |
+|   1   | base_contact |  False   |
++-------+--------------+----------+
+
+[INFO] Reward Manager:  <RewardManager> contains 16 active terms.
++-------------------------------------------+
+|            Active Reward Terms            |
++-------+-----------------------+-----------+
+| Index | Name                  |    Weight |
++-------+-----------------------+-----------+
+|   0   | track_lin_vel_xy_exp  |       0.5 |
+|   1   | ang_vel_xy_l2         |     -0.05 |
+|   2   | dof_torques_l2        |       0.0 |
+|   3   | dof_acc_l2            | -1.25e-07 |
+|   4   | action_rate_l2        |    -0.005 |
+|   5   | feet_air_time         |      0.25 |
+|   6   | flat_orientation_l2   |      -1.0 |
+|   7   | dof_pos_limits        |      -1.0 |
+|   8   | termination_penalty   |    -200.0 |
+|   9   | feet_slide            |     -0.25 |
+|   10  | joint_deviation_hip   |     -0.05 |
+|   11  | joint_deviation_arms  |     -0.05 |
+|   12  | joint_deviation_torso |     -0.02 |
+|   13  | feet_stumble          |      -0.5 |
+|   14  | heading_tracking      |       0.2 |
+|   15  | style_tracking        |       2.0 |
++-------+-----------------------+-----------+
+
+[INFO] Curriculum Manager:  <CurriculumManager> contains 0 active terms.
++----------------------+
+| Active Curriculum Terms |
++-----------+----------+
+|   Index   | Name     |
++-----------+----------+
++-----------+----------+
+
+[INFO]: Completed setting up the environment...
+[eval_motion debug] env created
+[eval_motion debug] resume_path=/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1/model_2000.pt exists=True
+[eval_motion debug] creating OnPolicyRunner
+ActorCritic.__init__ got unexpected arguments, which will be ignored: ['history_length']
+Actor MLP: Sequential(
+  (0): Linear(in_features=1389, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=19, bias=True)
+)
+Critic MLP: Sequential(
+  (0): Linear(in_features=768, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=1, bias=True)
+)
+Loading Base Policy from /workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2024-11-03_15-08-09_height_scan_obst/model_4999_pad877_256.pt...
+ActorCritic.__init__ got unexpected arguments, which will be ignored: ['history_length']
+Actor MLP: Sequential(
+  (0): Linear(in_features=877, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=19, bias=True)
+)
+Critic MLP: Sequential(
+  (0): Linear(in_features=768, out_features=512, bias=True)
+  (1): ELU(alpha=1.0)
+  (2): Linear(in_features=512, out_features=256, bias=True)
+  (3): ELU(alpha=1.0)
+  (4): Linear(in_features=256, out_features=128, bias=True)
+  (5): ELU(alpha=1.0)
+  (6): Linear(in_features=128, out_features=1, bias=True)
+)
+Base Policy Loaded with mismatched keys. Missing: ['critic.0.weight', 'critic.0.bias', 'critic.2.weight', 'critic.2.bias', 'critic.4.weight', 'critic.4.bias', 'critic.6.weight', 'critic.6.bias'], Unexpected: []
+Unfreezing Base Policy Layer: actor.6 (Linear(in_features=128, out_features=19, bias=True))
+[eval_motion debug] loading checkpoint
+[eval_motion debug] checkpoint loaded
+[eval_motion debug] style_term=yes style_list=通常
+[eval_motion debug] styles_to_eval(1): ['通常']
+[eval_motion debug] env_wrapper ready
+Loaded HOYO samples (train=False, back->front):
+  通常: 32 samples
+[eval_motion debug] begin evaluation loop
+[eval_motion debug] evaluating 通常
+    [INFO] Centroid embedding loaded for 通常
+    [INFO] Random sample embedding loaded for 通常
+Evaluating 通常:   0%|          | 0/5 [00:00<?, ?it/s]Evaluating 通常:  20%|██        | 1/5 [00:00<00:00,  9.94it/s]Evaluating 通常:  40%|████      | 2/5 [00:00<00:00,  9.33it/s]                                                              [StyleModule] Available H1 body names: ['pelvis', 'left_hip_yaw_link', 'right_hip_yaw_link', 'torso_link', 'left_hip_roll_link', 'right_hip_roll_link', 'left_shoulder_pitch_link', 'right_shoulder_pitch_link', 'left_hip_pitch_link', 'right_hip_pitch_link', 'left_shoulder_roll_link', 'right_shoulder_roll_link', 'left_knee_link', 'right_knee_link', 'left_shoulder_yaw_link', 'right_shoulder_yaw_link', 'left_ankle_link', 'right_ankle_link', 'left_elbow_link', 'right_elbow_link']
+[StyleModule] Final body indices: [3, 3, 7, 19, 19, 6, 18, 18, 2, 13, 17, 1, 12, 16]
+[StyleModule] Offsets applied for: ['head', 'neck', 'r_hand', 'l_hand']
+[StyleModule] Offset overrides applied for: ['head', 'neck', 'r_hand', 'l_hand']
+
+  [RESULT] 通常
+    mean_velocity_x: -0.0158 ± 0.0161
+    cos_centroid_samples: 0
+    cos_random_sample_samples: 0
+    style_score_samples: 0
+    mean_joint_error (L2): 2.1920
+    fall_rate: 0.00%
+    mean_reward_total: +0.002865 ± 0.000177
+    mean_action_sq: 3.765717
+    reward_terms (top-|mean|):
+      - track_lin_vel_xy_exp: +0.003452 ± 0.000231
+      - joint_deviation_arms: -0.000177 ± 0.000103
+      - action_rate_l2: -0.000123 ± 0.000114
+      - ang_vel_xy_l2: -0.000100 ± 0.000028
+      - joint_deviation_hip: -0.000091 ± 0.000037
+      - dof_acc_l2: -0.000074 ± 0.000049
+      - joint_deviation_torso: -0.000015 ± 0.000014
+      - flat_orientation_l2: -0.000007 ± 0.000006
+    rate^mag (報酬寄与率):
+      - track_lin_vel_xy_exp: 85.46%
+      - joint_deviation_arms: 4.38%
+      - action_rate_l2: 3.04%
+      - ang_vel_xy_l2: 2.49%
+      - joint_deviation_hip: 2.26%
+      - dof_acc_l2: 1.84%
+      - joint_deviation_torso: 0.37%
+      - flat_orientation_l2: 0.17%
+    rate^adv (Advantage寄与率):
+      - action_rate_l2: 32.52%
+      - track_lin_vel_xy_exp: 23.47%
+      - joint_deviation_arms: 17.69%
+      - dof_acc_l2: 8.81%
+      - ang_vel_xy_l2: 7.95%
+      - joint_deviation_hip: 7.67%
+      - joint_deviation_torso: 1.28%
+      - flat_orientation_l2: 0.61%
+    share^E (関節エネルギー割合):
+      - joint_6: 24.60%
+      - joint_11: 21.67%
+      - joint_15: 17.33%
+      - joint_16: 15.73%
+      - joint_5: 6.75%
+      - joint_14: 3.61%
+      - joint_8: 2.61%
+      - joint_2: 1.35%
+[eval_motion debug] saving results to eval_results/motion
+
+============================================================================================================
+EVALUATION SUMMARY
+Command: lin_vel_x=0.5, lin_vel_y=0.0, ang_vel_z=0.0
+============================================================================================================
+Onomatopoeia  Cmd X    Vel X    Style   Cos(C)   Cos(R)   L2 Err  DTW Err    Fall%
+------------------------------------------------------------------------------------------------------------
+通常             0.50   -0.016      N/A      N/A      N/A   2.1920      N/A    0.0%
+============================================================================================================
+Style = cos(teacher_style) - cos(teacher_normal), Cos(C/R) = embedding similarity, L2/DTW Err = joint error
+Results saved to: eval_results/motion/eval_motion_20260201_153659.json
+Surface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdPrimvarReader_matrix.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+
+2026-02-01 15:36:55 [6,022ms] [Warning] [omni.usd] Warning: in GetNodeDiscoveryResults at line 136 of /builds/omniverse/usd-ci/USD/pxr/usd/usdShade/shaderDefUtils.cpp -- Unable to resolve info:sourceAsset </UsdTransform2d.info:mdl:sourceAsset> with value @UsdPreviewSurface.mdl@.
+

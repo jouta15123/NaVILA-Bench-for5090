@@ -196,165 +196,88 @@ python hoyo_v1_1/viz/plot_latent_spaces.py \
 - `--label-mode coarse-with-normal` で「通常」を独立カテゴリとして表示
 - unknown words は `hoyo_v1_1/data/unknown_words_coarse.txt` を編集すれば反映される
 
-### オノマトペ別評価
+### Exp-C 評価（eval_motion.py / 新encoder使用）
+
+新しい対照学習encoderを使用した評価。
 
 ```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
+STYLE_RUN_NAME=20260127_contrastive_vae_fine_lambda_vae_sarashina_fine_lv0.12_temp0.05_lc2.0_lv0.12_s43_f2000_full8000_full \
 STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run <RUN_DIRECTORY_NAME> \
-  --checkpoint model_2999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --compute_hoyo_error
+/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_motion.py \
+  --task h1_vision_without_speedinput_exp_c_fixed03 \
+  --load_run 2026-01-28_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_seed42_dup1 \
+  --checkpoint model_2000.pt \
+  --num_envs 16 \
+  --eval_steps 500 \
+  --terrain flat \
+  --log_reward_terms \
+  --headless
 ```
 
-### 評価オプション一覧
+### Exp-C 評価（video保存 / Docker）
 
-| オプション | 説明 | デフォルト |
-|------------|------|------------|
-| `--task` | タスク名 | 必須 |
-| `--load_run` | 学習済みモデルのディレクトリ名 | 必須 |
-| `--checkpoint` | チェックポイントファイル名 | model_*.pt |
-| `--num_envs` | 環境数（通常1で評価） | 1 |
-| `--eval_steps` | 評価ステップ数 | 300 |
-| `--video` | MP4動画を保存 | False |
-| `--video_length` | 動画の長さ（ステップ数） | 500 |
-| `--no_base_policy` | Base Policyを無効化 | False (デフォルトでロード) |
-| `--compute_hoyo_error` | HOYOエラーを計算 | False |
-| `--output_dir` | 結果出力先 | eval_results/style_per_onomatopoeia |
-| `--base_velocity_mode` | 速度モード (fixed, style_table) | fixed |
-| `--base_velocity_table` | 速度テーブルJSONパス | None |
-| `--save_hoyo_gif` | HOYO 2Dマッピングを GIF で保存 | False |
-| `--save_hoyo_comparison_gif` | H1とHOYOリファレンスの比較GIF | False |
-| `--hoyo_gif_fps` | GIF の FPS | 50 |
-| `--hoyo_gif_stride` | GIF フレームストライド | 2 |
-
-### ✅ 修正済み: Base Policy のロード
-
-**Base Policyはデフォルトでロードされるようになりました。**
-
-ResidualActorCritic アーキテクチャでは：
-- 学習時: Base Policy + Style Residual で学習
-- 評価時: Base Policy が自動ロードされる ✅
-
-無効化したい場合のみ `--no_base_policy` を指定してください。
-
-### ✅ 修正済み: yaw リセット
-
-**heading_fixed タスクでは yaw=0 で初期化されるようになりました（訓練と同じ）。**
-
----
-
-## 評価例
-
-### 基本評価（h1_vision_heading_fixed で学習したモデル）
+video 保存時は `--enable_cameras` が必要。
 
 ```bash
 STYLE_RUN_NAME=20260109_optuna_trial1_full \
 STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run 2026-01-09_15-16-31_trial_h1_vision_style_flat \
-  --checkpoint model_1999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --compute_hoyo_error
-```
-
-### Exp-A 評価（h1_vision_heading_fixed_exp_a で学習したモデル）
-
-```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
-STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed_exp_a \
-  --load_run 2026-01-11_14-09-32_exp_a_style2_orient05 \
+/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_motion.py \
+  --task h1_vision_without_speedinput_exp_c_fixed03 \
+  --load_run 2026-02-01_h1_vision_without_speedinput_exp_c_fixed03_exp_c_cmd03_stylew4_seed42 \
   --checkpoint model_2999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --compute_hoyo_error
-```
-
-### スタイル別速度テーブルを使用した評価
-
-```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
-STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run <RUN_DIRECTORY_NAME> \
-  --checkpoint model_2999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --compute_hoyo_error \
-  --base_velocity_mode style_table \
-  --base_velocity_table configs/style_speed_table_auto.json
-```
-
-### MP4 動画を保存（全オノマトペ）
-
-`--video` を付けると各オノマトペごとに MP4 が保存されます。  
-動画長は `--video_length`（ステップ数）で指定し、**50 FPS 固定**で保存されます。
-
-```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
-STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run <RUN_DIRECTORY_NAME> \
-  --checkpoint model_2999.pt \
-  --num_envs 1 \
+  --num_envs 16 \
+  --eval_steps 500 \
+  --terrain flat \
+  --log_reward_terms \
   --video \
-  --video_length 500
+  --video_length 500 \
+  --enable_cameras \
+  --headless
 ```
 
-動画は `eval_results/style_per_onomatopoeia/videos/` に保存されます。
+### 比較doc用: 既存JSONから混同行列を速度順で再生成
 
-### HOYO マッピングを GIF で可視化
-
-H1ロボットのポーズがHOYO 2D座標にどう変換されているか確認できます。
+`eval_motion.py` の評価を再実行せず、既存の `eval_motion_*.json` から
+混同行列画像だけを速度順（すたすた→…→よろよろ）で再生成する。
 
 ```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
-STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run <RUN_DIRECTORY_NAME> \
-  --checkpoint model_2999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --save_hoyo_gif \
-  --hoyo_gif_fps 30 \
-  --hoyo_gif_stride 2
+/home/jouta/venvs/motionclip/bin/python scripts/experiments/regenerate_confusion_heatmap_from_json.py \
+  --input-json eval_results/motion/20260201_compare/old_dup1_m2000/eval_motion_20260201_091804.json \
+  --output-png docs/experiments/assets/20260201_h1_vision_style_reward_comparison/old_dup1_m2000_confusion_heatmap_centered_speed_order_20260207.png \
+  --title "H1 vs HOYO Similarity Matrix (Centered Cos, Speed Order)"
+
+/home/jouta/venvs/motionclip/bin/python scripts/experiments/regenerate_confusion_heatmap_from_json.py \
+  --input-json eval_results/motion/eval_motion_20260203_000603.json \
+  --output-png docs/experiments/assets/20260201_h1_vision_style_reward_comparison/new_stylew4_dup1_m2000_confusion_heatmap_centered_speed_order_20260207.png \
+  --title "H1 vs HOYO Similarity Matrix (Centered Cos, Speed Order)"
 ```
 
-GIFは `eval_results/style_per_onomatopoeia/hoyo_gifs/` に保存されます。
+### 比較doc用: 既存JSONからマージン行列を速度順で再生成（主指標）
 
-### H1 と HOYO リファレンスの比較 GIF
-
-H1ロボットの動作と、HOYOデータセットの教師データを並べて比較できます。
+`M[i,j] = S[i,i] - S[i,j]`（`S`: centered cosine）を画像化する。
 
 ```bash
-STYLE_RUN_NAME=20260109_optuna_trial1_full \
-STYLE_CENTROID_MODE=random \
-/workspace/IsaacLab/isaaclab.sh -p legged-loco/scripts/eval_style_per_onomatopoeia.py \
-  --task h1_vision_heading_fixed \
-  --load_run <RUN_DIRECTORY_NAME> \
-  --checkpoint model_2999.pt \
-  --num_envs 1 \
-  --eval_steps 300 \
-  --save_hoyo_comparison_gif \
-  --hoyo_gif_fps 30 \
-  --hoyo_gif_stride 2
+/home/jouta/venvs/motionclip/bin/python scripts/experiments/regenerate_confusion_heatmap_from_json.py \
+  --mode margin \
+  --sim-key hoyo_similarity_centered_mean \
+  --input-json eval_results/motion/20260201_compare/old_dup1_m2000/eval_motion_20260201_091804.json \
+  --output-png docs/experiments/assets/20260201_h1_vision_style_reward_comparison/old_dup1_m2000_margin_heatmap_centered_speed_order_20260207.png \
+  --title "H1 vs HOYO Margin Matrix (Centered Cos, Speed Order)"
+
+/home/jouta/venvs/motionclip/bin/python scripts/experiments/regenerate_confusion_heatmap_from_json.py \
+  --mode margin \
+  --sim-key hoyo_similarity_centered_mean \
+  --input-json eval_results/motion/eval_motion_20260203_000603.json \
+  --output-png docs/experiments/assets/20260201_h1_vision_style_reward_comparison/new_stylew4_dup1_m2000_margin_heatmap_centered_speed_order_20260207.png \
+  --title "H1 vs HOYO Margin Matrix (Centered Cos, Speed Order)"
+
+/home/jouta/venvs/motionclip/bin/python scripts/experiments/regenerate_confusion_heatmap_from_json.py \
+  --mode margin \
+  --sim-key hoyo_similarity_centered_mean \
+  --input-json eval_results/motion/eval_motion_20260202_082729.json \
+  --output-png docs/experiments/assets/20260201_h1_vision_style_reward_comparison/stylew6_m2999_margin_heatmap_centered_speed_order_20260207.png \
+  --title "H1 vs HOYO Margin Matrix (Centered Cos, Speed Order)"
 ```
-
-比較GIFは `eval_results/style_per_onomatopoeia/hoyo_comparison_gifs/` に保存されます。
-- 左: H1ロボットのマッピング（青）
-- 右: HOYOリファレンス（緑）
-
----
 
 ## タスク一覧
 

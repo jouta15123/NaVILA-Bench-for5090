@@ -76,6 +76,11 @@ class OnPolicyRunner:
         self.tot_time = 0
         self.current_learning_iteration = 0
         self.git_status_repos = [rsl_rl.__file__]
+        # Contribution logging config
+        self.contrib_cfg = self.cfg.get("contrib", {})
+        self.contrib_enabled = bool(self.contrib_cfg.get("enabled", False))
+        self.contrib_interval = max(1, int(self.contrib_cfg.get("interval", 1)))
+        self.contrib_topk = max(1, int(self.contrib_cfg.get("topk", 8)))
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):
         # initialize writer
@@ -118,6 +123,17 @@ class OnPolicyRunner:
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
             start = time.time()
+            contrib_active = self.contrib_enabled and (it % self.contrib_interval == 0)
+            reward_term_names = None
+            reward_terms_sum = None
+            reward_terms_abs_sum = None
+            reward_terms_steps = None
+            reward_terms_count = 0
+            reward_terms_active_mask = None
+            reward_step_dt = None
+            joint_names = None
+            action_sq_sum = None
+            action_count = 0
             # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
@@ -138,6 +154,72 @@ class OnPolicyRunner:
                         dones.to(self.device),
                     )
                     self.alg.process_env_step(rewards, dones, infos)
+
+                    if contrib_active:
+                        base_env = self.env.unwrapped
+                        reward_mgr = getattr(base_env, "reward_manager", None)
+                        if reward_mgr is not None and hasattr(reward_mgr, "active_terms") and hasattr(reward_mgr, "_step_reward"):
+                            if reward_step_dt is None:
+                                reward_step_dt = float(getattr(base_env, "step_dt", 1.0))
+                            term_names = list(getattr(reward_mgr, "active_terms", []))
+                            step_terms = reward_mgr._step_reward
+                            if (
+                                reward_term_names is None
+                                and isinstance(step_terms, torch.Tensor)
+                                and step_terms.ndim == 2
+                                and step_terms.shape[1] == len(term_names)
+                            ):
+                                # add bootstrap term for time_outs to align with PPO rewards
+                                reward_term_names = term_names + ["__bootstrap__"]
+                                num_terms = len(reward_term_names)
+                                reward_terms_sum = torch.zeros(num_terms, device="cpu", dtype=torch.float)
+                                reward_terms_abs_sum = torch.zeros(num_terms, device="cpu", dtype=torch.float)
+                                reward_terms_steps = torch.zeros(
+                                    self.num_steps_per_env, self.env.num_envs, num_terms, device="cpu", dtype=torch.float
+                                )
+                                # Mask out terms with zero weight (RewardManager does not update _step_reward for them).
+                                try:
+                                    weights = []
+                                    for name in term_names:
+                                        try:
+                                            weights.append(float(reward_mgr.get_term_cfg(name).weight))
+                                        except Exception:
+                                            weights.append(1.0)
+                                    w = torch.tensor(weights, device=step_terms.device, dtype=torch.float)
+                                    reward_terms_active_mask = (w != 0.0).to(dtype=torch.float)
+                                except Exception:
+                                    reward_terms_active_mask = None
+                            if reward_term_names is not None and reward_terms_steps is not None:
+                                per_step_terms = step_terms * reward_step_dt
+                                if (
+                                    reward_terms_active_mask is not None
+                                    and reward_terms_active_mask.numel() == per_step_terms.shape[1]
+                                ):
+                                    per_step_terms = per_step_terms * reward_terms_active_mask
+                                reward_terms_steps[i, :, : per_step_terms.shape[1]] = per_step_terms.detach().cpu()
+                                reward_terms_sum[: per_step_terms.shape[1]] += per_step_terms.sum(dim=0).detach().cpu()
+                                reward_terms_abs_sum[: per_step_terms.shape[1]] += per_step_terms.abs().sum(dim=0).detach().cpu()
+                                reward_terms_count += int(per_step_terms.shape[0])
+                                if "time_outs" in infos:
+                                    time_outs = torch.as_tensor(infos["time_outs"], device=self.device).float()
+                                    bootstrap = self.alg.gamma * self.alg.transition.values.squeeze(-1) * time_outs
+                                    reward_terms_steps[i, :, -1] = bootstrap.detach().cpu()
+                                    reward_terms_sum[-1] += bootstrap.sum().detach().cpu()
+                                    reward_terms_abs_sum[-1] += bootstrap.abs().sum().detach().cpu()
+
+                        if actions is not None:
+                            if action_sq_sum is None:
+                                action_sq_sum = torch.zeros(actions.shape[-1], device="cpu", dtype=torch.float)
+                                try:
+                                    robot = base_env.scene.get("robot")
+                                    if robot is not None and hasattr(robot, "joint_names"):
+                                        joint_names = list(robot.joint_names)
+                                    else:
+                                        joint_names = [f"joint_{j}" for j in range(actions.shape[-1])]
+                                except Exception:
+                                    joint_names = [f"joint_{j}" for j in range(actions.shape[-1])]
+                            action_sq_sum += (actions ** 2).sum(dim=0).detach().cpu()
+                            action_count += actions.shape[0]
 
                     if self.log_dir is not None:
                         # Book keeping
@@ -161,6 +243,18 @@ class OnPolicyRunner:
                 # Learning step
                 start = stop
                 self.alg.compute_returns(critic_obs)
+                if contrib_active and self.writer is not None:
+                    self._log_contrib_metrics(
+                        it,
+                        reward_term_names,
+                        reward_terms_sum,
+                        reward_terms_abs_sum,
+                        reward_terms_steps,
+                        reward_terms_count,
+                        action_sq_sum,
+                        action_count,
+                        joint_names,
+                    )
 
             mean_value_loss, mean_surrogate_loss = self.alg.update()
             stop = time.time()
@@ -180,6 +274,69 @@ class OnPolicyRunner:
                         self.writer.save_file(path)
 
         self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+
+    def _log_contrib_metrics(
+        self,
+        iteration: int,
+        reward_term_names,
+        reward_terms_sum,
+        reward_terms_abs_sum,
+        reward_terms_steps,
+        reward_terms_count: int,
+        action_sq_sum,
+        action_count: int,
+        joint_names,
+    ) -> None:
+        if self.writer is None:
+            return
+
+        def _sanitize(name: str) -> str:
+            return name.replace("/", "_")
+
+        # rate^mag
+        if reward_term_names is not None and reward_terms_abs_sum is not None and reward_terms_count > 0:
+            total_abs = float(reward_terms_abs_sum.sum().item())
+            if total_abs > 0.0:
+                rate_mag = reward_terms_abs_sum / total_abs
+                k = min(self.contrib_topk, rate_mag.numel())
+                topk = torch.topk(rate_mag, k)
+                for idx, val in zip(topk.indices.tolist(), topk.values.tolist()):
+                    name = _sanitize(reward_term_names[idx])
+                    self.writer.add_scalar(f"Train/Contrib/rate_mag/{name}", float(val) * 100.0, iteration)
+                self.writer.add_scalar("Train/Contrib/reward_term_samples", reward_terms_count, iteration)
+
+        # rate^adv (covariance with unnormalized advantages)
+        if reward_term_names is not None and reward_terms_steps is not None:
+            advantages = (self.alg.storage.returns - self.alg.storage.values).squeeze(-1).detach().cpu()
+            flat_adv = advantages.reshape(-1)
+            flat_terms = reward_terms_steps.reshape(-1, reward_terms_steps.shape[-1])
+            if flat_terms.shape[0] == flat_adv.shape[0] and flat_terms.numel() > 0:
+                r_mean = flat_terms.mean(dim=0)
+                a_mean = flat_adv.mean()
+                cov = ((flat_terms - r_mean) * (flat_adv - a_mean).unsqueeze(1)).mean(dim=0)
+                cov_abs = cov.abs()
+                total_cov = float(cov_abs.sum().item())
+                if total_cov > 0.0:
+                    rate_adv = cov_abs / total_cov
+                    k = min(self.contrib_topk, rate_adv.numel())
+                    topk = torch.topk(rate_adv, k)
+                    for idx, val in zip(topk.indices.tolist(), topk.values.tolist()):
+                        name = _sanitize(reward_term_names[idx])
+                        self.writer.add_scalar(f"Train/Contrib/rate_adv/{name}", float(val) * 100.0, iteration)
+                    self.writer.add_scalar("Train/Contrib/adv_samples", int(flat_adv.numel()), iteration)
+
+        # share^E
+        if action_sq_sum is not None and action_count > 0:
+            total_energy = float(action_sq_sum.sum().item())
+            if total_energy > 0.0:
+                mean_action_sq = total_energy / float(action_count)
+                self.writer.add_scalar("Train/Contrib/mean_action_sq", mean_action_sq, iteration)
+                share_e = action_sq_sum / total_energy
+                k = min(self.contrib_topk, share_e.numel())
+                topk = torch.topk(share_e, k)
+                for idx, val in zip(topk.indices.tolist(), topk.values.tolist()):
+                    name = _sanitize(joint_names[idx] if joint_names else f"joint_{idx}")
+                    self.writer.add_scalar(f"Train/Contrib/share_e/{name}", float(val) * 100.0, iteration)
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
