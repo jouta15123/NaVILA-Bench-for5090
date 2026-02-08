@@ -98,6 +98,42 @@ class H1VisionRoughPPORunnerCfg_FullFT(H1RoughPPORunnerCfg):
     )
 
 
+@configclass
+class H1VisionRoughPPORunnerCfg_Res08OldEnc(H1VisionRoughPPORunnerCfg):
+    """Residual scale 0.8 for old encoder comparison runs."""
+
+    experiment_name = "h1_vision_rough_res08_oldenc"
+    logger = "wandb"
+    wandb_project = "StyleWalker_RL"
+    wandb_tags = ["staged"]
+
+    policy = CustomPpoActorCriticCfg(
+        init_noise_std=1.0,
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu",
+        class_name="ResidualActorCritic",
+        base_policy_checkpoint="/workspace/NaVILA-Bench/logs/rsl_rl/h1_vision_rough/2024-11-03_15-08-09_height_scan_obst/model_4999_pad877_256.pt",
+        style_dim=512,
+        residual_scale=0.8,
+        unfreeze_base_last_layer=True,
+    )
+
+
+@configclass
+class H1VisionRoughPPORunnerCfg_Res08NewEnc(H1VisionRoughPPORunnerCfg_Res08OldEnc):
+    """Residual scale 0.8 for new encoder comparison runs."""
+
+    experiment_name = "h1_vision_rough_res08_newenc"
+
+
+@configclass
+class H1VisionRoughPPORunnerCfg_FullFT_ExpCNewEnc(H1VisionRoughPPORunnerCfg_FullFT):
+    """Full fine-tune runner for Exp-C with new encoder."""
+
+    experiment_name = "h1_vision_rough_fullft_exp_c_newenc"
+
+
 
 """Configuration for custom terrains."""
 ROUGH_TERRAINS_CFG = TerrainGeneratorCfg(
@@ -696,6 +732,24 @@ class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03(H1VisionRoughEnvCfg_Wit
         self.rewards.flat_orientation_l2.weight = -1.0
         # feet_air_time を上げすぎると低速でも足上げが過剰になりやすいので、まずは基準値へ戻す。
         self.rewards.feet_air_time.weight = 0.25
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08OldEnc(H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03):
+    """Exp-C fixed03 variant for old encoder comparison."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.style_command.run_name = "20260109_optuna_trial1_full"
+
+
+@configclass
+class H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08NewEnc(H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03):
+    """Exp-C fixed03 variant for new encoder comparison."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.commands.style_command.run_name = "20260127_contrastive_vae_fine_lambda_vae_sarashina_fine_lv0.12_temp0.05_lc2.0_lv0.12_s43_f2000_full8000_full"
 
 
 @configclass

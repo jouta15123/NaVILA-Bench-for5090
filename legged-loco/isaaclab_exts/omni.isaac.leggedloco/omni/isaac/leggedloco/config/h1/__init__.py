@@ -10,9 +10,14 @@ from .h1_low_vision_cfg import (
     H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB,
     H1VisionRoughEnvCfg_WithoutSpeedInput_ExpB_Fixed05,
     H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03,
+    H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08OldEnc,
+    H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08NewEnc,
     H1VisionRoughEnvCfg_PLAY,
     H1VisionRoughPPORunnerCfg,
     H1VisionRoughPPORunnerCfg_FullFT,
+    H1VisionRoughPPORunnerCfg_FullFT_ExpCNewEnc,
+    H1VisionRoughPPORunnerCfg_Res08OldEnc,
+    H1VisionRoughPPORunnerCfg_Res08NewEnc,
 )
 
 ##
@@ -119,6 +124,36 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03,
         "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg,
+    },
+)
+
+gym.register(
+    id="h1_vision_without_speedinput_exp_c_fixed03_res08_oldenc",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08OldEnc,
+        "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg_Res08OldEnc,
+    },
+)
+
+gym.register(
+    id="h1_vision_without_speedinput_exp_c_fixed03_res08_newenc",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08NewEnc,
+        "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg_Res08NewEnc,
+    },
+)
+
+gym.register(
+    id="h1_vision_without_speedinput_exp_c_fixed03_fullft_newenc",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": H1VisionRoughEnvCfg_WithoutSpeedInput_ExpC_Fixed03_Res08NewEnc,
+        "rsl_rl_cfg_entry_point": H1VisionRoughPPORunnerCfg_FullFT_ExpCNewEnc,
     },
 )
 

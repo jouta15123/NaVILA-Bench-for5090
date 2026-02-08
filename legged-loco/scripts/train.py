@@ -139,6 +139,25 @@ parser.add_argument(
 )
 parser.add_argument("--style_ramp_steps", type=int, default=None, help="Override style reward ramp steps.")
 parser.add_argument(
+    "--style_reward_mode",
+    type=str,
+    default="legacy",
+    choices=["legacy", "hardneg"],
+    help="Style reward mode. legacy=existing behavior, hardneg=add hard-negative penalty.",
+)
+parser.add_argument(
+    "--style_neg_weight",
+    type=float,
+    default=0.0,
+    help="Hard-negative penalty weight for style reward (effective in --style_reward_mode=hardneg).",
+)
+parser.add_argument(
+    "--style_neg_margin",
+    type=float,
+    default=0.0,
+    help="Hard-negative margin for style reward (effective in --style_reward_mode=hardneg).",
+)
+parser.add_argument(
     "--style_centroid_mode",
     type=str,
     default=None,
@@ -413,6 +432,12 @@ def _build_run_note(args_cli, env_cfg) -> str:
         parts.append(f"bTeach{_format_float_token(beta_teacher)}")
     if args_cli.style_ramp_steps is not None:
         parts.append(f"ramp{args_cli.style_ramp_steps}")
+    if args_cli.style_reward_mode != "legacy":
+        parts.append(f"styleMode{args_cli.style_reward_mode}")
+    if args_cli.style_neg_weight > 0.0:
+        parts.append(f"negW{_format_float_token(args_cli.style_neg_weight)}")
+    if args_cli.style_neg_margin > 0.0:
+        parts.append(f"negM{_format_float_token(args_cli.style_neg_margin)}")
     if args_cli.style_centroid_mode is not None:
         parts.append(f"centroid{args_cli.style_centroid_mode}")
     if args_cli.style_list is not None:
@@ -580,6 +605,9 @@ def main():
             env_cfg.rewards.style_tracking.params["beta_teacher_motion"] = beta_teacher_motion
         if args_cli.style_ramp_steps is not None:
             env_cfg.rewards.style_tracking.params["ramp_steps"] = args_cli.style_ramp_steps
+        env_cfg.rewards.style_tracking.params["style_reward_mode"] = args_cli.style_reward_mode
+        env_cfg.rewards.style_tracking.params["style_neg_weight"] = args_cli.style_neg_weight
+        env_cfg.rewards.style_tracking.params["style_neg_margin"] = args_cli.style_neg_margin
     elif args_cli.no_style_reward:
         print("[WARN] --no_style_reward was requested but rewards.style_tracking is not available in this task.")
     if args_cli.style_list is not None and hasattr(env_cfg, "commands"):

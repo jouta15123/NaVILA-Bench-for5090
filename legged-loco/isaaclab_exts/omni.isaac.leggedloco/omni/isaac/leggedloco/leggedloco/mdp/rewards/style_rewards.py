@@ -22,6 +22,9 @@ def style_reward(
     beta_teacher_motion: float = 1.0,
     beta_centroid: float | None = None,
     ramp_steps: int = 0,
+    style_reward_mode: str = "legacy",
+    style_neg_weight: float = 0.0,
+    style_neg_margin: float = 0.0,
 ) -> torch.Tensor:
     """
     Reward based on cosine similarity between agent's motion latent and target style latent.
@@ -74,26 +77,114 @@ def style_reward(
     target_z_onm = cmd_gen.style_latents
     target_teacher_motion = cmd_gen.teacher_motion_latents
     
-    # 3. Compute
+    # 3. Compute positive reward (legacy formula)
     if beta_centroid is not None:
         beta_teacher_motion = beta_centroid
     reward, r_text, r_teacher_motion = cmd_gen.style_module.compute_current_reward(
         target_z_onm, target_teacher_motion, beta_text, beta_teacher_motion
     )
     reward_raw = reward
+    requested_mode = str(style_reward_mode).strip().lower()
+    if requested_mode not in {"legacy", "hardneg"}:
+        requested_mode = "legacy"
+    effective_mode = requested_mode
+    if requested_mode == "hardneg" and style_neg_weight <= 0.0:
+        effective_mode = "legacy"
+    style_neg_sim = torch.zeros_like(reward_raw)
+    style_neg_penalty = torch.zeros_like(reward_raw)
+
+    # 4. Optional hard-negative penalty
+    if requested_mode == "hardneg" and style_neg_weight > 0.0:
+        try:
+            if not hasattr(cmd_gen, "current_label_ids"):
+                raise RuntimeError("current_label_ids is not available")
+            class_centroids = getattr(cmd_gen.style_module, "class_centroids", None)
+            if not isinstance(class_centroids, dict) or len(class_centroids) < 2:
+                raise RuntimeError("class_centroids are not available")
+
+            if isinstance(cmd_gen.current_label_ids, torch.Tensor):
+                label_ids = cmd_gen.current_label_ids.to(device=env.device, dtype=torch.long).view(-1)
+            elif isinstance(cmd_gen.current_label_ids, (list, tuple)):
+                if len(cmd_gen.current_label_ids) != env.num_envs:
+                    raise RuntimeError("current_label_ids size mismatch")
+                label_ids = torch.tensor(cmd_gen.current_label_ids, device=env.device, dtype=torch.long)
+            else:
+                raise RuntimeError("current_label_ids type is unsupported")
+
+            z_agent = cmd_gen.style_module.encode_buffer()
+            z_agent = torch.nan_to_num(z_agent, nan=0.0)
+            z_agent = torch.nn.functional.normalize(z_agent, dim=-1)
+
+            centroid_ids = []
+            centroid_vectors = []
+            for label_id, centroid in class_centroids.items():
+                try:
+                    label_id_int = int(label_id)
+                except Exception:
+                    continue
+                if not isinstance(centroid, torch.Tensor):
+                    centroid = torch.tensor(centroid, device=z_agent.device, dtype=z_agent.dtype)
+                centroid = centroid.to(device=z_agent.device, dtype=z_agent.dtype).view(-1)
+                if centroid.numel() != z_agent.shape[-1]:
+                    continue
+                centroid = torch.nn.functional.normalize(centroid, dim=-1)
+                centroid_ids.append(label_id_int)
+                centroid_vectors.append(centroid)
+
+            if len(centroid_vectors) < 2:
+                raise RuntimeError("not enough valid centroids for hard negatives")
+
+            centroid_bank = torch.stack(centroid_vectors, dim=0)  # (C, D)
+            sims = z_agent @ centroid_bank.t()  # (B, C)
+
+            id_to_col = {lab_id: col for col, lab_id in enumerate(centroid_ids)}
+            target_cols = torch.full((env.num_envs,), -1, device=env.device, dtype=torch.long)
+            for label_id, col in id_to_col.items():
+                target_cols[label_ids == int(label_id)] = int(col)
+            valid_rows = target_cols >= 0
+
+            non_target_mask = torch.ones_like(sims, dtype=torch.bool)
+            if valid_rows.any():
+                non_target_mask[valid_rows, target_cols[valid_rows]] = False
+            has_negatives = valid_rows & non_target_mask.any(dim=1)
+            if not has_negatives.any():
+                raise RuntimeError("no valid hard negatives for current labels")
+
+            masked_sims = sims.masked_fill(~non_target_mask, float("-inf"))
+            style_neg_sim[has_negatives] = masked_sims[has_negatives].max(dim=1).values
+            style_neg_sim = torch.nan_to_num(style_neg_sim, nan=0.0, posinf=1.0, neginf=-1.0)
+            style_neg_penalty = torch.relu(style_neg_sim - r_teacher_motion + style_neg_margin)
+            style_neg_penalty = torch.nan_to_num(style_neg_penalty, nan=0.0, posinf=10.0, neginf=0.0)
+
+            # Keep warmup behavior aligned with legacy reward.
+            if hasattr(cmd_gen.style_module, "warmup_counter") and hasattr(cmd_gen.style_module, "warmup_frames"):
+                warmup_mask = (cmd_gen.style_module.warmup_counter >= cmd_gen.style_module.warmup_frames).float()
+                style_neg_penalty = style_neg_penalty * warmup_mask
+
+            reward_raw = reward_raw - float(style_neg_weight) * style_neg_penalty
+            reward_raw = torch.nan_to_num(reward_raw, nan=0.0, posinf=10.0, neginf=-10.0)
+        except Exception:
+            # Fallback to legacy reward when labels/centroids are unavailable.
+            effective_mode = "legacy"
     
-    # Optionally ramp up style reward to avoid early destabilization
+    # 5. Optionally ramp up style reward to avoid early destabilization
     if ramp_steps is not None and ramp_steps > 0:
         step_count = getattr(env, "common_step_counter", 0)
         scale = min(1.0, float(step_count) / float(ramp_steps))
-        reward = reward * scale
+        reward = reward_raw * scale
     else:
+        reward = reward_raw
         scale = 1.0
 
-    # Log metrics to env.extras (for IsaacLab internal logging)
+    # 6. Log metrics to env.extras (for IsaacLab internal logging)
     if hasattr(env, "extras"):
         env.extras["metrics/style_text_sim"] = r_text.mean()
         env.extras["metrics/style_teacher_motion_sim"] = r_teacher_motion.mean()
+        env.extras["metrics/style_neg_sim"] = style_neg_sim.mean()
+        env.extras["metrics/style_neg_penalty"] = style_neg_penalty.mean()
+        env.extras["metrics/style_reward_mode"] = torch.tensor(
+            1.0 if effective_mode == "hardneg" else 0.0, device=env.device
+        )
         env.extras["metrics/style_reward_raw"] = reward_raw.mean()
         env.extras["metrics/style_reward_scaled"] = reward.mean()
         env.extras["metrics/style_reward_scale"] = torch.tensor(scale, device=env.device)
@@ -115,6 +206,9 @@ def style_reward(
             log_payload = {
                 "debug/style_text_sim": r_text.mean().item(),
                 "debug/style_teacher_motion_sim": r_teacher_motion.mean().item(),
+                "debug/style_neg_sim": style_neg_sim.mean().item(),
+                "debug/style_neg_penalty": style_neg_penalty.mean().item(),
+                "debug/style_reward_mode": effective_mode,
                 "debug/style_reward_raw": reward_raw.mean().item(),
                 "debug/style_reward_scaled": reward.mean().item(),
                 "debug/style_reward_min": reward.min().item(),
