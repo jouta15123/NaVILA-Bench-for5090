@@ -1,0 +1,42 @@
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.dvi
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.xdv
+
+# Experiment and generated outputs (archive policy)
+logs/
+eval_results/
+wandb/
+**/logs/
+**/eval_results/
+**/wandb/
+**/joint_training_results/
+**/proto_training_results/
+**/log/
+**/outputs/
+
+# Large local assets not part of archive
+isaaclab_exts/omni.isaac.vlnce/assets/
+_extracted/
