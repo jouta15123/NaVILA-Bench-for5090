@@ -1,0 +1,21 @@
+token
+.vscode/
+
+# LaTeX build artifacts, but keep figs/*.pdf
+*.aux
+*.bbl
+*.blg
+*.dvi
+*.fdb_latexmk
+*.fls
+*.log
+*.lof
+*.lot
+*.out
+main.pdf
+*.synctex.gz
+*.toc
+*.xdv
+Nomura_BachelorThesis_2024.pdf
+Yamada_BachelorThesis_2024.pdf
+RL.md

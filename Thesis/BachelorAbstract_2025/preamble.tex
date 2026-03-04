@@ -1,0 +1,92 @@
+% 大阪大学基礎工学部知能システム学コース 特別研究概要スタイルファイル
+\typeout{大阪大学基礎工学部知能システム学コース 特別研究概要スタイルファイル(2019/12/24) by 堀井隆斗}
+
+\usepackage{amsmath,amssymb,bm}
+\usepackage[dvipdfmx]{graphicx}
+%\usepackage[dvips]{graphicx}
+\usepackage{ascmac}
+\usepackage{calc}
+\usepackage{kvsetkeys}
+\usepackage{kvoptions}
+\usepackage{tikz}
+\usepackage{progressbar}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage {subfigmat}
+\usepackage {diagbox}
+\flushbottom
+\sloppy
+
+% 余白
+
+\setlength{\paperwidth}{210mm}
+\setlength{\paperheight}{297mm}
+\setlength{\voffset}{0mm}
+\setlength{\textwidth}{\paperwidth}
+\addtolength{\textwidth}{-30mm}
+\setlength{\textheight}{\paperheight}
+\addtolength{\textheight}{-40mm}
+\setlength{\topmargin}{-1in}
+\addtolength{\topmargin}{15mm}
+\setlength{\headheight}{0mm}
+\setlength{\headsep}{0mm}
+\setlength{\footskip}{10mm}
+\setlength{\oddsidemargin}{-1in}
+\addtolength{\oddsidemargin}{15mm}
+\setlength{\columnsep}{7mm}
+
+% ヘッダ＆タイトル
+
+\makeatletter
+\def\headding#1{\gdef\@headding{#1}}
+%\headding{研究進捗報告書}
+\def\@maketitle{\newpage
+\setlength{\topsep}{0mm}
+ \null
+ \begin{center}
+ {\Large {\bf \@title} \par}
+ \vspace{1mm}
+ {\large 学籍番号：{\@date} \hspace{10pt} 吉川研究室 \hspace{10pt} {\@author} \par}
+ \end{center}
+ \vskip 1.5\baselineskip
+ }
+% 章間の間隔を調整する
+\renewcommand{\section}{%
+  \@startsection{section}{1}{\z@}%
+  {0.4\Cvs}{0.1\Cvs}%
+  {\large\bf}}
+%  {\normalfont\large\headfont\raggedright}}
+
+\renewcommand{\subsection}{%
+  \@startsection{subsection}{1}{\z@}%
+  {0.4\Cvs}{0.1\Cvs}%
+  {\large\bf}}
+
+\renewcommand{\subsubsection}{%
+  \@startsection{subsubsection}{1}{\z@}%
+  {0.4\Cvs}{0.1\Cvs}%
+  {\normalsize}}
+\makeatother
+
+% 図のキャプションをFig.に，表のキャプションをTableにする
+
+\def\fnum@figure{{\bf \figurename}~\thefigure}
+\renewcommand{\figurename}{Fig.}
+
+\def\fnum@table{{\bf \tablename~\thetable}}
+\renewcommand{\tablename}{Table}
+
+% 箇条書きの行間調節
+
+\renewenvironment{itemize}{%
+  \begin{list}{\theenumi.~}{%
+  \usecounter{enumi}%
+  \setlength{\itemsep}{-.5\baselineskip}%
+  \setlength{\parsep}{.5\baselineskip}%
+  }}{\end{list}}
+
+% 本文中の数式を別行立て数式と同じように表示する
+
+\everymath{\displaystyle}
+
+\pagestyle{empty} % すべてのページ番号を消

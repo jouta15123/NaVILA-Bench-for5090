@@ -1,0 +1,29 @@
+{
+  "_comment": "H1 Robot to HOYO Skeleton Mapping",
+  "_description": "Maps H1 body links to HOYO 14-joint skeleton format",
+  "_hoyo_order": "0:Head, 1:Neck, 2:R-Shoulder, 3:R-Elbow, 4:R-Hand, 5:L-Shoulder, 6:L-Elbow, 7:L-Hand, 8:R-Hip, 9:R-Knee, 10:R-Ankle, 11:L-Hip, 12:L-Knee, 13:L-Ankle",
+  
+  "_note_offsets_mode": "When using h1_minimal.usd (no marker Xforms), map to torso/elbow and use offsets in h1_to_hoyo_offsets.json.",
+  
+  "head": "torso_link",
+  "neck": "torso_link",
+
+  "r_shoulder": "right_shoulder_pitch_link",
+  "r_elbow": "right_elbow_link",
+  "r_hand": "right_elbow_link",
+
+  "l_shoulder": "left_shoulder_pitch_link",
+  "l_elbow": "left_elbow_link",
+  "l_hand": "left_elbow_link",
+
+  "r_hip": "right_hip_yaw_link",
+  "r_knee": "right_knee_link",
+  "r_ankle": "right_ankle_link",
+
+  "l_hip": "left_hip_yaw_link",
+  "l_knee": "left_knee_link",
+  "l_ankle": "left_ankle_link",
+
+  "_offsets_note": "Offsets are applied in style_module.py when mapping to torso/elbow or if joints are missing.",
+  "_fallback_note": "If you switch to marker USD, update mapping to head/neck/hand_tip or use marker override in debug scripts."
+}

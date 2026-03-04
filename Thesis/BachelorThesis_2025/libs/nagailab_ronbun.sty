@@ -1,0 +1,79 @@
+%%------------------------------------------------------------%%
+%% 大阪大学長井研究室卒業論文用スタイルファイルVer.0.01
+%%------------------------------------------------------------%%
+
+%ページ設定
+%%マージン　上2.5cm,下2cm,左3cm,右2cmに調整
+\setcounter{secnumdepth}{3}
+\if0
+	\evensidemargin 5mm
+	\oddsidemargin 5mm
+	\topmargin 0in
+	\textwidth 16cm
+	\textheight 25.2cm
+	\headheight 0.0in
+	\headsep 0.0in
+	\topskip 0.0in
+\fi
+
+% rename
+\renewcommand{\bibname}{参考文献} %% 「関連図書」→「参考文献」に変更
+\renewcommand{\abstractname}{\Huge{概要}}
+\def\eqref#1{式(\ref{#1})}
+\def\figref#1{図\ref{#1}}
+\def\tableref#1{表\ref{#1}}
+
+% 表紙に関する設定
+%% ページ番号の表示がないページに設定
+\pagestyle{empty}
+%% 変数
+\def\jtitlename#1{\gdef\@jtitlename{#1}}
+\def\idnumber#1{\gdef\@idnumber{#1}}
+\def\affiliation#1{\gdef\@affiliation{#1}}
+
+\renewcommand{\maketitle}{
+	\renewcommand{\arraystretch}{1.2}
+	\begin{titlepage}
+		\let\footnotesize\small
+		\let\footnoterule\relax
+		\let\footnote\thanks
+		\null\vfil
+		\begin{center}%
+			{\LARGE \bf \@jtitlename\par}
+			\vskip2em
+			{題目\par}
+			\vskip1em
+			{\Large \bf \@title\par}
+
+			\vskip4cm%
+			{指導教員\par}
+			\vskip1em
+			{\large 吉川 雄一郎 教授\par}
+			{\large 堀井 隆斗 准教授\par}
+			%{\large 宮澤 和貴 助教\par}
+
+			\vskip2cm%
+			{報告者\par}
+			\vskip1em
+			{\Large\@author(\@idnumber)\par}
+
+			\vskip2cm%
+			{\large \@date\par}
+			{\large\@affiliation}
+		\end{center}\par
+		\@thanks\vfil\null
+	\end{titlepage}
+
+	\setcounter{footnote}{0}
+	\global\let\thanks\relax
+	\global\let\maketitle\relax
+	\global\let\@thanks\@empty
+	\global\let\@author\@empty
+	\global\let\@date\@empty
+	\global\let\@title\@empty
+	\global\let\title\relax
+	\global\let\author\relax
+	\global\let\date\relax
+	\global\let\and\relax
+	\renewcommand{\arraystretch}{1}
+}
